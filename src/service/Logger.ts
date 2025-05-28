@@ -96,6 +96,15 @@ interface LogFieldType {
     CODE_FUNC?: Uint8Array;
 }
 
+// Специфичные типы ошибок
+/** Ошибка, возникающая при невозможности инициализации Unix socket для JournalLogger */
+export class SocketInitError extends Error {
+    constructor(message = 'Failed to initialize socket', options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'SocketInitError';
+    }
+}
+
 /** Базовый интерфейс для всех логгеров */
 interface Logger {
 
@@ -264,7 +273,7 @@ export class JournalLogger implements Logger, Decommissionable {
 
         } catch (error) {
             this.socket = null;
-            throw new Error('Failed to create journal socket.', { cause: error });
+            throw new SocketInitError('Failed to create journal socket.', { cause: error });
         }
 
     }
