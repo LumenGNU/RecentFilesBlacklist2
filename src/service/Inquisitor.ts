@@ -1,8 +1,9 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.0.0 */
+/** @version: 1.0.1 */
 /**
  * @changelog
+ * # 1.0.1 - Исправлены и дополнены типы ошибок
  * # 1.0.0 - Стабильная версия
  */
 
@@ -146,7 +147,12 @@ export enum Thoroughness {
  * inquisitor.process_abort('Отменено пользователем');
  * // Promise от do_process будет отклонён с new ProcessAbortError('Отменено пользователем')
  * ``` */
-export class ProcessAbortError extends Error { }
+export class ProcessAbortError extends Error {
+    constructor(message = 'Process aborted', options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'ProcessAbortError';
+    }
+}
 
 /** Ошибка отсутствия критериев фильтрации.
  *
@@ -180,7 +186,12 @@ export class ProcessAbortError extends Error { }
  *
  * @see {@link Inquisitor.set_criteria} Для установки критериев
  * @see {@link Inquisitor.criteria} Для проверки текущих критериев */
-export class EmptyCriteriaError extends Error { }
+export class EmptyCriteriaError extends Error {
+    constructor(message = 'Empty criteria', options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'EmptyCriteriaError';
+    }
+}
 
 /** Ошибка валидации критериев фильтрации.
  *
@@ -248,7 +259,12 @@ export class EmptyCriteriaError extends Error { }
  *
  * @see {@link Inquisitor.set_criteria} Метод, который выбрасывает эту ошибку
  * @see {@link CriteriaSpec} Формат валидных критериев */
-export class CriteriaValidateError extends Error { }
+export class CriteriaValidateError extends Error {
+    constructor(message = 'Invalid criteria', options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'CriteriaValidateError';
+    }
+}
 
 /** Inquisitor - Проверяет URI файлов на соответствие заданным критериям фильтрации.
  *
@@ -425,13 +441,13 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * @see {@link add_to_trustworthy_list} Метод управления кэшем */
     static MAX_CACHE_SIZE = 1000 as const;
 
-    /** Базовый интервал между проверками файлов в миллисекундах.
+    /** Интервал между проверками файлов в миллисекундах.
      *
      * Определяет задержку между обработкой отдельных файлов в процессе
      * проверки. Фактическая задержка зависит от выбранного режима:
      *
-     * - **Thoroughness.thorough** (0): задержка = 0 * 2 = 0 мс (без пауз)
-     * - **Thoroughness.lazy** (1): задержка = 1 * 2 = 2 мс
+     * - **Thoroughness.thorough** (0): задержка = 0 * PROCESS_INTERVAL = 0 мс (всегда без пауз)
+     * - **Thoroughness.lazy** (1): задержка = 1 * PROCESS_INTERVAL = PROCESS_INTERVAL мс
      *
      * Малое значение (2 мс) обеспечивает плавную работу в ленивом режиме,
      * позволяя системе обрабатывать другие задачи между проверками файлов,
@@ -625,29 +641,33 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                 // Компилируем критерии, заполняем во временный массив
                 for (const criterion of criteria) {
                     if (typeof criterion !== 'object' || criterion === null) {
-                        throw new CriteriaValidateError('Criterion must be an object');
+                        throw new Error('Criterion must be an object');
                     }
                     if (criterion.label) {
                         if (typeof criterion.label !== 'string') {
                             // если указана метка, то она должна быть строкой
-                            throw new CriteriaValidateError(`Invalid label: '${criterion.label}'. Label must be a string`);
+                            throw new Error(`Invalid label: '${criterion.label}'. Label must be a string`);
                         }
                     }
                     switch (criterion.type) {
                         case 'glob':
                             if (typeof (criterion as CriteriaSpec<'glob'>).pattern === 'string'
                                 && (criterion as CriteriaSpec<'glob'>).pattern.length > 0) {
-                                _eligibility_criteria.push({
-                                    type: 'glob',
-                                    pattern_spec: new GLib.PatternSpec((criterion as CriteriaSpec<'glob'>).pattern),
-                                    label: (criterion as CriteriaSpec<'glob'>).label ?? (criterion as CriteriaSpec<'glob'>).pattern
-                                } as CompiledCriteriaSpec<'glob'>);
+                                try {
+                                    _eligibility_criteria.push({
+                                        type: 'glob',
+                                        pattern_spec: new GLib.PatternSpec((criterion as CriteriaSpec<'glob'>).pattern),
+                                        label: (criterion as CriteriaSpec<'glob'>).label ?? (criterion as CriteriaSpec<'glob'>).pattern
+                                    } as CompiledCriteriaSpec<'glob'>);
+                                } catch (error) {
+                                    throw new Error(`Failed to compile glob pattern: '${(criterion as CriteriaSpec<'glob'>).pattern}'`, { cause: error });
+                                }
                             } else {
                                 throw new CriteriaValidateError(`Invalid glob pattern: '${(criterion as CriteriaSpec<'glob'>).pattern}'. Glob pattern must be a non-empty string`);
                             }
                             break;
                         default:
-                            throw new CriteriaValidateError(`Unsupported criteria type: '${criterion.type}'`);
+                            throw new Error(`Unsupported criteria type: '${criterion.type}'`);
                     }
                 }
             } catch (error) {
