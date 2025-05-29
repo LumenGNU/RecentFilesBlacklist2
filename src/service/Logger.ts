@@ -1,8 +1,23 @@
 /** @file: src/service/Logger.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.0.0 */
+/** @version: 2.0.0 */
 /**
  *  @changelog
+ *
+ * # 2.0.0 - Реализована собственная архитектура с абстрактным классом Logger
+ *         - Добавлен JournalLogger с прямой отправкой через Unix socket
+ *         - Добавлен StdErrLogger с цветным форматированием
+ *         - Система sub_msg() для иерархических сообщений
+ *         - Поддержка цепочек ошибок через Error.cause
+ *         - Фильтрация DEBUG сообщений в production (JournalLogger)
+ *         - GLib логирование оказалось неработоспособным в среде GJS
+ *         - Полный переход на собственную систему логирования
+ *         - Отказ от GLib.log_set_writer_func из-за проблем с GJS биндингами
+ *         - GLib.log_set_writer_func отлично работает в C, но не в JavaScript обертке
+ *
+ * # 1.0.1 - Исправлены и дополнены типы ошибок
+ *         - Получилась какашка
+ *
  * # 1.0.0 - Стабильная версия
  *           - Переработана и дополнена документация
  *           - Протестированы основные сценарии
@@ -21,81 +36,6 @@ import GLib from 'gi://GLib?version=2.0';
 
 import { DecommissionedError, Decommissionable } from '../shared/Decommissionable.interface.js';
 
-/** ## Система логирования для GJS-приложений
- *
- * Набор классов, предоставляющих калбэк для установки логгера через `GLib.log_set_writer_func()`
- *
- * Особенности использования в GJS:
- *
- * - `GLib.LogField[]` приходит как объект с числовыми ключами (`Uint8Array`)
- * - Нельзя переключать логгеры во время выполнения (`SIGTRAP`)
- * - Один логгер устанавливается на весь сеанс через `GLib.log_set_writer_func()`
- *
- * @example
- * ~~~ts
- * // Установка логгера при инициализации расширения
- * const logger = new StdErrLogger();
- * GLib.log_set_writer_func(logger.log_writer_func);
- *
- * // При деактивации расширения
- * logger.decommission();
- * ~~~
- *
- * ### Особенности логирования
- *
- * Эта система рассчитана на работу поверх стандартных сообщений console.*
- *
- * - `console.info()` - Уведомление о нормальном состоянии, если оно полезно для пользователя
- * - `console.log()` - Сообщения о ходе работы, если оно полезно для пользователя
- * - `console.debug()` - Логирование отладочных сообщений. НЕ будет полезно пользователь. НЕ попадет в журнал
- * - `console.warn()` - Важное уведомление, не связанное с отладкой. Должно быть полезно пользователю
- * - `console.error()` - Уведомление об аварийном состоянии, не связанное с отладкой. Должно быть полезно пользователю;
- * - `console.count()` - передается как INFO. Не должно использоваться
- * - `console.time()` - передается как MESSAGE. Не должно использоваться
- * - `console.timeEnd()` - передается как MESSAGE. Не должно использоваться
- * - `console.timeLog()` - передается как MESSAGE. Не должно использоваться
- * - `console.trace()` - передается как MESSAGE. Должно быть полезно пользователю
- *
- * ### Производительность
- *
- * - `DEBUG` сообщения фильтруются на уровне `JournalLogger` (не отправляются)
- * - Сообщения других доменов (не 'Gjs-Console') игнорируются сразу
- * - Unix socket используется в datagram режиме (без установки соединения)
- *
- * ## Best Practices
- *
- * - Устанавливайте логгер один раз при инициализации
- * - Всегда вызывайте `decommission()` при завершении работы
- * - Используйте `StdErrLogger` для разработки, `JournalLogger` для production
- * - `NullLogger` полезен для "немых" сервисов
- *
- * */
-
-
-/** Представляет поля лога как они реально приходят из GJS
- * (несмотря на то что типы говорят GLib.LogField[])
- *
- * В GJS поля логов приходят не как массив `GLib.LogField[]`, а как объект
- * с полями-свойствами, содержащими `Uint8Array` с закодированными строками.
- *
- * @see {@link Logger} - интерфейс логгера, использующий эти поля
- * @internal
- * */
-interface LogFieldType {
-    /** Текст сообщения в UTF-8 */
-    MESSAGE: Uint8Array;
-    /** Приоритет сообщения (число в виде строки) */
-    PRIORITY: Uint8Array;
-    /** Домен GLib (обычно 'Gjs-Console' - наш домен) */
-    GLIB_DOMAIN: Uint8Array;
-    /** Путь к файлу исходного кода */
-    CODE_FILE?: Uint8Array;
-    /** Номер строки в файле */
-    CODE_LINE?: Uint8Array;
-    /** Имя функции */
-    CODE_FUNC?: Uint8Array;
-}
-
 // Специфичные типы ошибок
 /** Ошибка, возникающая при невозможности инициализации Unix socket для JournalLogger */
 export class SocketInitError extends Error {
@@ -105,30 +45,172 @@ export class SocketInitError extends Error {
     }
 }
 
-/** Базовый интерфейс для всех логгеров */
-interface Logger {
+/** Ошибка, при работе с сокетом */
+export class SocketError extends Error {
+    constructor(message = 'Send to Journal Socket fail!', options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'SocketError';
+    }
+}
 
-    /** Функция обработки лог-сообщений для `GLib.log_set_writer_func()`
+/** Уровни логирования в порядке убывания важности */
+enum LogLevel {
+    /** Критические ошибки */
+    error,
+    /** Предупреждения */
+    warning,
+    /** Информационные сообщения */
+    message,
+    /** Отладочная информация */
+    debug
+}
+
+/** Базовый абстрактный класс для всех логгеров
+ *
+ * Предоставляет единый интерфейс для логирования с поддержкой:
+ * - Различных уровней логирования (error, warn, debug, log, info)
+ * - Цепочек ошибок через Error.cause
+ * - Вложенных сообщений через sub_msg()
+ *  */
+abstract class Logger {
+
+    #last_log_level = LogLevel.message as LogLevel;
+
+    /** Функция обработки лог-сообщений
      *
-     * @param log_level уровень лог-сообщения (ERROR, WARNING, INFO и т.д.)
-     * @param fields поля лога в формате GJS (объект с Uint8Array полями)
-     * @returns GLib.LogWriterOutput.HANDLED сообщение обработано
-     * @returns GLib.LogWriterOutput.UNHANDLED сообщение не обработано (при ошибке отправки)
+     * Должна быть реализована в наследниках для определения
+     * куда и как выводить сообщения
      *
-     * @throws {DecommissionedError} Если логгер был деактивирован через `decommission()`
-     *  */
-    log_writer_func: (log_level: GLib.LogLevelFlags, fields: GLib.LogField[]) => GLib.LogWriterOutput;
+     * @param log_level Уровень логирования
+     * @param message Текст сообщения
+     * @param pad_level Уровень вложенности для отступов (0 = основное сообщение) */
+    protected abstract _log_writer(log_level: LogLevel, message: string, pad_level: number): void;
+
+    #do_msg(log_level: LogLevel, content: string | Error, error?: Error) {
+        this.#last_log_level = log_level;
+        if (typeof content === 'string') {
+            this._log_writer(log_level, content, 0);
+        } else {
+            this.#do_err(log_level, content, 0);
+        }
+
+        if (error !== undefined) {
+            this.#do_err(log_level, error, 1);
+        }
+
+        GLib.log_set_writer_func;
+    }
+
+    #do_sub_msg(content: string | Error) {
+        if (typeof content === 'string') {
+            this._log_writer(this.#last_log_level, content, 1);
+        } else {
+            this.#do_err(this.#last_log_level, content, 1);
+        }
+    }
+
+    #do_err(log_level: LogLevel, err: Error, pad: number) {
+        const stack = err.stack ? `\n${err.stack}` : '';
+        const msg = `${err.name}: ${err.message}${stack}`;
+        this._log_writer(log_level, msg, pad);
+        if (err.cause) {
+            this.#do_err(log_level, (err.cause as Error), ++pad);
+        }
+    }
+
+    /** Логирование критических ошибок
+     *
+     * @param msg Сообщение об ошибке */
+    error(msg: string): void;
+    /**
+     * @param err Объект ошибки */
+    error(err: Error): void;
+    /**
+     * @param msg Сообщение об ошибке
+     * @param err Объект ошибки */
+    error(msg: string, err: Error): void;
+    error(content: string | Error, error?: Error): void {
+        this.#do_msg(LogLevel.error, content, error);
+    }
+
+    /** Логирование предупреждений
+     *
+     * @param msg Текст предупреждения */
+    warn(msg: string): void;
+    /**
+     * @param err Объект ошибки как предупреждение */
+    warn(err: Error): void;
+    /**
+     * @param msg Текст предупреждения
+     * @param err Связанная ошибка */
+    warn(msg: string, err: Error): void;
+    warn(content: string | Error, error?: Error): void {
+        this.#do_msg(LogLevel.warning, content, error);
+    }
+
+
+    /** Логирование отладочной информации
+     *
+     * @param msg Отладочное сообщение */
+    debug(msg: string): void;
+    /**
+     * @param err Ошибка для отладки */
+    debug(err: Error): void;
+    /**
+     * @param msg Отладочное сообщение
+     * @param err Связанная ошибка */
+    debug(msg: string, err: Error): void;
+    debug(content: string | Error, error?: Error): void {
+        this.#do_msg(LogLevel.debug, content, error);
+    }
+
+    /** Логирование обычных информационных сообщений
+     *
+     * @param msg Информационное сообщение */
+    log(msg: string): void;
+    /**
+     * @param err Ошибка как информационное сообщение */
+    log(err: Error): void;
+    /**
+     * @param msg Информационное сообщение
+     * @param err Связанная ошибка */
+    log(msg: string, err: Error): void;
+    log(content: string | Error, error?: Error): void {
+        this.#do_msg(LogLevel.message, content, error);
+    }
+
+    /** Логирование информационного сообщения (упрощенная версия log)
+     *
+     * @param msg Информационное сообщение */
+    info(msg: string): void {
+        this.#do_msg(LogLevel.message, msg);
+    }
+
+    /** Логирование вложенного сообщения
+     *
+     * Использует уровень логирования последнего основного сообщения
+     * и добавляет отступ для показа иерархии
+     *
+     * @param msg Вложенное сообщение */
+    sub_msg(msg: string): void;
+    /**
+     * @param err Ошибка как вложенное сообщение */
+    sub_msg(err: Error): void;
+    sub_msg(content: string | Error): void {
+        this.#do_sub_msg(content);
+    }
+
 }
 
 /** Логгер-"пустышка" - блокирует все сообщения
  *
  * Используется для полного отключения логирования */
-export class NullLogger implements Logger, Decommissionable {
+export class NullLogger extends Logger implements Decommissionable {
 
-    /** Функция обработки лог-сообщений для `GLib.log_set_writer_func()` */
-    log_writer_func(_log_level: GLib.LogLevelFlags, _fields: GLib.LogField[]) {
+    /** Функция обработки лог-сообщений` */
+    protected _log_writer() {
         /* nothing */
-        return GLib.LogWriterOutput.HANDLED;
+        return;
     }
 
     decommission(): void {
@@ -137,19 +219,25 @@ export class NullLogger implements Logger, Decommissionable {
         }
 
         // "Ломаем" все публичные методы
-        this.log_writer_func = (throw_decommissioned as typeof this.log_writer_func);
+        this._log_writer = (throw_decommissioned as typeof this._log_writer);
     }
 }
 
 /** Логгер для вывода в stderr с цветным форматированием
  *
  * Особенности:
- * - Фильтрует сообщения только от домена 'Gjs-Console'
  * - Добавляет цвета для разных уровней
- * - Для ошибок создает кликабельные ссылки на файлы */
-export class StdErrLogger implements Logger, Decommissionable {
+ * - // @todo Для ошибок создает кликабельные ссылки на файлы */
+export class StdErrLogger extends Logger implements Decommissionable {
 
-    private text_decoder = new TextDecoder();
+    static MARKER_PADDING = 8 as const;
+    static MARKER_BOUND = '⋮' as const;
+    static MSG_MARKER = {
+        [LogLevel.error]: 'ERROR',
+        [LogLevel.warning]: 'WARNING',
+        [LogLevel.message]: 'INFO',
+        [LogLevel.debug]: 'DEBUG'
+    };
 
     /** Маппинг уровней логирования на ANSI escape-коды для цветного вывода
      *
@@ -162,41 +250,29 @@ export class StdErrLogger implements Logger, Decommissionable {
      *
      * @see https://en.wikipedia.org/wiki/ANSI_escape_code#Colors */
     static MESSAGE_COLORS = {
-        [GLib.LogLevelFlags.LEVEL_ERROR]: 'ERROR    : \x1B[31;49m', // красный (31)
-        [GLib.LogLevelFlags.LEVEL_CRITICAL]: 'CRITICAL : \x1B[31;49m', // красный (31)
-        [GLib.LogLevelFlags.LEVEL_WARNING]: 'WARNING  : \x1B[33;49m', // жёлтый (33)
-        [GLib.LogLevelFlags.LEVEL_MESSAGE]: 'MESSAGE  : \x1B[39;49m', // стандартный цвет текста (39)
-        [GLib.LogLevelFlags.LEVEL_INFO]: 'INFO     : \x1B[39;49m', // стандартный цвет текста (39)
-        [GLib.LogLevelFlags.LEVEL_DEBUG]: 'DEBUG    : \x1B[36;49m', // циановый (36) текст на стандартном фоне (49)
+        [LogLevel.error]: '\x1B[31;49m', // красный (31)
+        [LogLevel.warning]: '\x1B[33;49m', // жёлтый (33)
+        [LogLevel.message]: '\x1B[39;49m', // стандартный цвет текста (39)
+        [LogLevel.debug]: '\x1B[36;49m', // циановый (36) текст на стандартном фоне (49)
     } as const;
 
-    /** Функция обработки лог-сообщений для `GLib.log_set_writer_func()` */
-    log_writer_func = (log_level: GLib.LogLevelFlags, fields: GLib.LogField[]) => {
+    /** Функция обработки лог-сообщений */
+    protected _log_writer(log_level: LogLevel, message: string, pad_level: number = 0) {
 
-        // пропуск "чужих" сообщений
-        if ((this.text_decoder.decode((fields as unknown as LogFieldType).GLIB_DOMAIN)) === 'Gjs-Console') {
-
-            switch (log_level) {
-                case GLib.LogLevelFlags.LEVEL_CRITICAL:
-                case GLib.LogLevelFlags.LEVEL_ERROR:
-                case GLib.LogLevelFlags.LEVEL_WARNING: {
-                    const msg = this.text_decoder.decode((fields as unknown as LogFieldType).MESSAGE);
-                    const trimmed_msg = msg.trim();
-                    // Оборачивает в цвет. (Для файлов создаются ссылки. Корректируются пробелы - это нужно для правильного отображения внутри console.group())
-                    printerr(`${StdErrLogger.MESSAGE_COLORS[log_level]}${`${' '.repeat(msg.length - trimmed_msg.length)}\x1B]8;;${this.text_decoder.decode((fields as unknown as LogFieldType).CODE_FILE)}#L${this.text_decoder.decode((fields as unknown as LogFieldType).CODE_LINE)}\x1B\\${this.text_decoder.decode((fields as unknown as LogFieldType).CODE_FUNC)}: ${trimmed_msg}\x1B]8;;\x1B\\`}\x1B[0;0m`);
-                } break;
-                case GLib.LogLevelFlags.LEVEL_INFO:
-                case GLib.LogLevelFlags.LEVEL_MESSAGE:
-                case GLib.LogLevelFlags.LEVEL_DEBUG: {
-                    const msg_lines = this.text_decoder.decode((fields as unknown as LogFieldType).MESSAGE).split('\n');
-                    msg_lines.forEach((line) => {
-                        printerr(`${StdErrLogger.MESSAGE_COLORS[log_level]}${line}\x1B[0;0m`);
-                    });
-                } break;
+        const lines = message.split('\n').map((line, index) => {
+            const trimmed = line.trim();
+            if (trimmed.length > 0) {
+                return `${`${(pad_level === 0 && index === 0) ? StdErrLogger.MSG_MARKER[log_level] : ' '}`.padEnd(StdErrLogger.MARKER_PADDING, ' ')}${StdErrLogger.MARKER_BOUND} ${''.padEnd(pad_level * 2, '  ')}${StdErrLogger.MESSAGE_COLORS[log_level]}${trimmed}\x1B[0m`;
+            } else {
+                return undefined;
             }
-        }
+        });
 
-        return GLib.LogWriterOutput.HANDLED;
+        lines.forEach(line => {
+            if (line) {
+                printerr(line);
+            }
+        });
     };
 
     decommission() {
@@ -205,24 +281,20 @@ export class StdErrLogger implements Logger, Decommissionable {
         }
 
         // "Ломаем" все публичные методы
-        this.log_writer_func = (throw_decommissioned as typeof this.log_writer_func);
-
-        this.text_decoder = (undefined as unknown as typeof this.text_decoder);
+        this._log_writer = (throw_decommissioned as typeof this._log_writer);
     }
 }
 
 /** Логгер для отправки в systemd journal
  *
  * Особенности:
- * - Фильтрует сообщения только от домена 'Gjs-Console'
  * - НЕ передает в журнал DEBUG сообщения (не нужны в production)
+ * - Если передается многострочное сообщение - в журнал попадает только первая строка
  * - Использует Unix domain socket для отправки
  * - Автоматически закрывает соединение при `decommission()`
  *
  * @example
  * ~~~ts
- * const logger = new JournalLogger('my-extension');
- * GLib.log_set_writer_func(logger.log_writer_func);
  * ~~~
  *
  * Проверить логи:
@@ -232,35 +304,38 @@ export class StdErrLogger implements Logger, Decommissionable {
  *
  * @see {@link StdErrLogger} альтернативный логгер для вывода в stderr
  * @see {@link NullLogger} логгер-заглушка */
-export class JournalLogger implements Logger, Decommissionable {
+export class SystemJournalLogger extends Logger implements Decommissionable {
 
     static socket_path = '/run/systemd/journal/socket' as const;
 
-    static LEVEL = {
-        [GLib.LogLevelFlags.LEVEL_CRITICAL]: 2,
-        [GLib.LogLevelFlags.LEVEL_ERROR]: 3,
-        [GLib.LogLevelFlags.LEVEL_WARNING]: 4,
-        [GLib.LogLevelFlags.LEVEL_MESSAGE]: 5,
-        [GLib.LogLevelFlags.LEVEL_INFO]: 6,
-        [GLib.LogLevelFlags.LEVEL_DEBUG]: 7,
+    static JOURNAL_LEVEL = {
+        [LogLevel.error]: 3,
+        [LogLevel.warning]: 4,
+        [LogLevel.message]: 5,
+        [LogLevel.debug]: 7,
     } as const;
 
     private id: string;
-
-    private text_decoder = new TextDecoder();
-    private text_encoder = new TextEncoder();
+    private encoder;
 
     private socket: Gio.Socket | null;
     private address: Gio.UnixSocketAddress;
 
+    /** Конструктор JournalLogger
+     *
+     * @param id Идентификатор для SYSLOG_IDENTIFIER в журнале
+     * @throws {SocketInitError} Если не удалось инициализировать Unix socket */
     constructor(id: string) {
 
+        super();
+
+        this.encoder = new TextEncoder();
         this.id = id;
 
         try {// socket init
             // Проверяем существование сокета journal
-            if (!GLib.file_test(JournalLogger.socket_path, GLib.FileTest.EXISTS)) {
-                throw new Error(`Journal socket not found: ${JournalLogger.socket_path}`);
+            if (!GLib.file_test(SystemJournalLogger.socket_path, GLib.FileTest.EXISTS)) {
+                throw new Error(`Journal socket not found: ${SystemJournalLogger.socket_path}`);
             }
 
             this.socket = Gio.Socket.new(
@@ -269,7 +344,7 @@ export class JournalLogger implements Logger, Decommissionable {
                 Gio.SocketProtocol.DEFAULT
             );
 
-            this.address = Gio.UnixSocketAddress.new(JournalLogger.socket_path);
+            this.address = Gio.UnixSocketAddress.new(SystemJournalLogger.socket_path);
 
         } catch (error) {
             this.socket = null;
@@ -278,36 +353,31 @@ export class JournalLogger implements Logger, Decommissionable {
 
     }
 
-    /** Функция обработки лог-сообщений для `GLib.log_set_writer_func()` */
-    log_writer_func = (log_level: GLib.LogLevelFlags, fields: GLib.LogField[]) => {
+    /** Функция обработки лог-сообщений */
+    protected _log_writer(log_level: LogLevel, message: string, pad_level: number = 0) {
 
-        // пропуск отладочных сообщений
-        if (log_level !== GLib.LogLevelFlags.LEVEL_DEBUG) {
-            // пропуск "чужих" сообщений
-            if ((this.text_decoder.decode((fields as unknown as LogFieldType).GLIB_DOMAIN)) === 'Gjs-Console') {
+        if (log_level !== LogLevel.debug) {
+            try {
+                if (this.socket) {
 
-                try {
-                    if (this.socket) {
+                    const log_entry = [
+                        `SYSLOG_IDENTIFIER=${this.id}`,
+                        `PRIORITY=${SystemJournalLogger.JOURNAL_LEVEL[log_level]}`,
+                        `MESSAGE=${pad_level > 0 ? `${'*'.repeat(pad_level)} ` : ''}${message.split('\n')[0]}`,
+                        ''
+                    ].join('\n');
 
-                        const log_entry = [
-                            `SYSLOG_IDENTIFIER=${this.id}`,
-                            `PRIORITY=${JournalLogger.LEVEL[log_level]}`,
-                            `MESSAGE=${this.text_decoder.decode((fields as unknown as LogFieldType).MESSAGE)}`,
-                            ''
-                        ].join('\n');
-
-                        if (this.socket.send_to(this.address, this.text_encoder.encode(log_entry), null)) {
-                            return GLib.LogWriterOutput.HANDLED;
-                        }
+                    if (this.socket.send_to(this.address, this.encoder.encode(log_entry), null) > 0) {
+                        return;
                     }
-                    return GLib.LogWriterOutput.UNHANDLED;
 
-                } catch (_error) {
-                    return GLib.LogWriterOutput.UNHANDLED;
+                    throw new SocketError('Send to Journal Socket fail!');
                 }
+            } catch (error) {
+                printerr((error as Error).message);
+                printerr(message);
             }
         }
-        return GLib.LogWriterOutput.HANDLED;
     };
 
     decommission() {
@@ -316,17 +386,17 @@ export class JournalLogger implements Logger, Decommissionable {
         }
 
         // "Ломаем" все публичные методы
-        this.log_writer_func = (throw_decommissioned as typeof this.log_writer_func);
+        this._log_writer = (throw_decommissioned as typeof this._log_writer);
 
         // закрываем сокет
         if (this.socket) {
             this.socket.close();
         }
 
-        this.text_decoder = (undefined as unknown as typeof this.text_decoder);
-        this.text_encoder = (undefined as unknown as typeof this.text_encoder);
         this.socket = (undefined as unknown as typeof this.socket);
         this.address = (undefined as unknown as typeof this.address);
+        this.id = (undefined as unknown as typeof this.id);
+        this.encoder = (undefined as unknown as typeof this.encoder);
     }
 
 }
