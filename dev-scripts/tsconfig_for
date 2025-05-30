@@ -1,0 +1,384 @@
+#!/usr/bin/env -S node
+'use strict';
+/** @file: dev-scripts/tsconfig_for */
+/*
+ * Скрипт для
+ *
+ * Использование: node tsconfig_for < путь_к_файлу >
+ */;
+import fs from 'fs';
+import path from 'path';
+import * as child_process from 'child_process';
+import ts from 'typescript';
+
+// ======================================================================
+// Запуск скрипта с аргументами командной строки
+
+if (!process.argv[2]) {
+    console.error('\n\x1B[1;31mНеобходимо указать путь к файлу\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!fs.existsSync(process.argv[2])) {
+    console.error('\n\x1B[1;31mФайл должен существовать\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!fs.statSync(process.argv[2]).isFile()) {
+    console.error('\n\x1B[1;31mОжидается регулярный файл\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!process.argv[2].endsWith('.ts')) {
+    console.error('\n\x1B[1;31mОжидается файл с расширением .ts\x1B[0m\n');
+    process.exit(1);
+}
+
+// ======================================================================
+
+console.log(`\nКонфигурация для '${path.basename(process.argv[2])}'`);
+
+try {
+
+    const project = class {
+
+        /** Путь к корню Git-проекта
+         * @returns {string} Абсолютный путь к корню проекта
+         * @throws {Error} Если не удается определить корень проекта */
+        static root = (() => {
+
+            try {
+                return child_process.execSync('git rev-parse --show-toplevel',
+                    {
+                        cwd: path.dirname(path.resolve(process.argv[2])),
+                        encoding: 'utf-8'
+                    }).trim();
+            } catch (e) {
+                throw new Error('\x1B[1;31mНе удалось определить корень проекта через Git. Убедитесь, что скрипт запущен внутри Git-репозитория.\x1B[0m\n', { cause: e });
+            }
+        })();
+
+        /** Абсолютный путь к директории src/ */
+        static src = path.resolve(this.root, 'src');
+
+        /** Абсолютный путь к tsconfig/ директории для персональных конфигураций */
+        static tsconfig = path.resolve(this.root, 'tsconfig');
+
+        static {
+            Object.freeze(this);
+            Object.freeze(this.prototype);
+        }
+    };
+
+
+    const test_file = class {
+
+        /** имя файла */
+        static name = path.basename(process.argv[2]);
+
+        /** абсолютный путь к файлу */
+        static abs_path = path.resolve(process.argv[2]);
+
+        /** директория файла */
+        static abs_dirname = path.dirname(this.abs_path);
+
+        /** Абсолютный путь к персональному tsconfig.json */
+        static out_tsconfig = ((src, tsconfig) => {
+            const rel_dir = path.relative(src, this.abs_dirname);
+            if (rel_dir.length === 0 || !rel_dir.startsWith('..')) {
+                return path.resolve(tsconfig, rel_dir, this.name.replace(/\.ts$/, '.tsconfig.json'));
+            } else {
+                throw new Error(`\x1B[1;31mФайл ${this.name} должен находиться в под-директории src/\x1B[0m\n`);
+            }
+        })(project.src, project.tsconfig);
+
+        /** путь к tsconfig.json проекта для этого файла
+         * Ищет сначала в текущей директории, затем в под-директориях до корня проекта
+         * @returns {string|null} Путь к tsconfig.json или null если не найден */
+        static _config_path = ((root) => {
+            try {
+                // Поиск в директориях от директории с файлом до корневой директории проекта
+                let current_path = this.abs_path;
+
+                do {
+                    current_path = path.dirname(current_path);
+                    const tsconfig_path = path.join(current_path, 'tsconfig.json');
+
+                    if (fs.existsSync(tsconfig_path)) {
+                        return tsconfig_path;
+                    }
+                } while (current_path !== root);
+
+            } catch (e) {
+                throw new Error('\x1B[1;31mОшибка при поиске tsconfig.json\x1B[0m\n', { cause: e });
+            }
+
+            throw new Error('\x1B[1;31mtsconfig.json не найден в проекте\x1B[0m\n');
+        })(project.root);
+
+
+        /** Опции конфигурации TypeScript компилятора
+         * @returns {ts.CompilerOptions} Опции компилятора TypeScript
+         * @throws {Error} Если не удается найти или загрузить tsconfig.json */
+        static options = (() => {
+
+
+            let parsed_config = null;
+            try {
+
+                const tsconfig_file = ts.readConfigFile(this._config_path, ts.sys.readFile);
+                if (tsconfig_file.error) {
+                    throw new Error(`\x1B[1;31mОшибка при чтении tsconfig.json:\x1B[0m\n ${tsconfig_file.error.messageText}`);
+                }
+
+                parsed_config = ts.parseJsonConfigFileContent(
+                    tsconfig_file.config,
+                    ts.sys,
+                    path.dirname(this._config_path)
+                );
+
+                if (parsed_config.errors.length) {
+                    throw new Error(`\x1B[1;31mОшибки в tsconfig.json:\x1B[0m\n\n - ${parsed_config.errors.map(e => e.messageText).join(",\n - ")}`);
+                }
+
+                // console.log(JSON.stringify(parsed_config.options, null, 2));
+
+            } catch (e) {
+                throw e;
+            }
+
+            // опции компилятора
+            return parsed_config.options;
+
+        })();
+
+        /** TypeScript программа */
+        static _program = (() => {
+            const _cwd = process.cwd();
+            try {
+                process.chdir(this.abs_dirname);
+                return ts.createProgram([this.name], this.options);
+            } catch (e) {
+                throw e;
+            } finally {
+                process.chdir(_cwd);
+            }
+
+            // try {
+            //     const host = ts.createCompilerHost(this.options);
+            //     // const originalGetCurrentDirectory = host.getCurrentDirectory;
+
+            //     // Переопределяем текущую директорию для компилятора
+            //     host.getCurrentDirectory = () => this.abs_dirname;
+
+            //     return ts.createProgram([this.abs_path], this.options, host);
+            // } catch (e) {
+            //     throw e;
+            // }
+
+        })();
+
+        /** Проверка синтаксиса
+         * @throws {Error} Если обнаружены синтаксические ошибки */
+        static syntax_check = () => {
+            const check_result = this._program.getSyntacticDiagnostics();
+            if (check_result.length > 0) {
+                throw new Error(
+                    `\x1B[1;31mОбнаружены синтаксические ошибки:\x1B[0m\n\n - ${check_result.map(error => error.messageText).join("\n - ")}\n\nНевозможно продолжить работу\n`
+                );
+            }
+        };
+
+        /** Проверка семантики
+         * @throws {Error} Если обнаружены семантические ошибки */
+        static semantic_check = () => {
+            const check_result = this._program.getSemanticDiagnostics();
+            if (check_result.length > 0) {
+                throw new Error(
+                    `\x1B[1;31mОбнаружены семантические ошибки:\x1B[0m\n\n - ${check_result.map(error => error.messageText).join("\n - ")}\n\nНевозможно продолжить работу\n`
+                );
+            }
+        };
+
+        /** Получает список абсолютных путей к локальным зависимостям.
+         * Обходит AST и находит: import declarations, export declarations, dynamic imports
+         * Возвращает Абсолютные пути к файлу из import/export statement,
+         * если они существуют. */
+        static extract_dependencies = () => {
+
+            const dependencies = new Set();
+
+            /** Проверка существования локальной зависимости
+             * Учитывает настройку allowJs и автоматически проверяет варианты .js/.ts
+             * @param {string} file_path Абсолютный путь к файлу из import/export statement
+             * @returns {[exists, path]} */
+            function resolve_dependency(file_path, allowJs) {
+
+                // Если allowJs=true, сначала проверяем файл "как есть"
+                // Это покрывает случаи импорта  bare-.js файлов в TS проектах
+                if (allowJs) {
+                    if (fs.existsSync(file_path)) {
+                        return [true, file_path];
+                    }
+                }
+
+                // Проверяем TypeScript версию файла (.js → .ts)
+                // Это стандартная практика - в импортах указывают .js, а файлы .ts
+                const ts_file_path = file_path.replace(/.js$/, '.ts');
+                if (fs.existsSync(ts_file_path)) {
+                    return [true, ts_file_path];
+                }
+
+                return [false, null];
+            }
+
+            try {
+                /** Рекурсивная функция обхода AST
+                 * @param {ts.Node} node Узел AST для обработки */
+                const visit = (node) => {
+                    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+                        // Обработка динамических импортов: import('module')
+                        const argument = node.arguments[0];
+                        if (node.arguments.length > 0) {
+                            if (ts.isStringLiteral(argument)) {
+                                if (argument.text) {
+                                    const [exists, resolved] = resolve_dependency(path.resolve(this.abs_dirname, argument.text), this.options.allowJs);
+                                    if (exists) {
+                                        dependencies.add(resolved);
+                                    }
+                                }
+                            }
+                        }
+                    } else if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+                        // Обработка статических импортов и реэкспортов
+                        if (node.moduleSpecifier) {
+                            if (node.moduleSpecifier.text) {
+                                const [exists, resolved] = resolve_dependency(path.resolve(this.abs_dirname, node.moduleSpecifier.text), this.options.allowJs);
+                                if (exists) {
+                                    dependencies.add(resolved);
+                                }
+                            }
+                        }
+                    }
+                    // Рекурсивно обходим дочерние узлы
+                    ts.forEachChild(node, visit);
+                };
+
+                visit(this._program.getSourceFile(this.name));
+            } catch (e) {
+                throw e;
+            }
+
+            return dependencies;
+        };
+
+        static make_out_options = (resolved_depends, src) => {
+            const out_config = {};
+            try {
+                const base_dir = path.dirname(this.out_tsconfig);
+
+                out_config.compilerOptions = this.options;
+
+                if (out_config.compilerOptions.lib) {
+                    // конвертация путей в идентификаторы
+                    out_config.compilerOptions.lib = out_config.compilerOptions.lib.map(l => l.match(/lib\.(.*?)\.d\.ts/)[1]);
+                }
+
+                // конвертация из enum в строку
+                if (out_config.compilerOptions.module) {
+                    out_config.compilerOptions.module = ts.ModuleKind[out_config.compilerOptions.module];
+                }
+                if (out_config.compilerOptions.moduleResolution) {
+                    out_config.compilerOptions.moduleResolution = ts.ModuleResolutionKind[out_config.compilerOptions.moduleResolution];
+                }
+                if (out_config.compilerOptions.target) {
+                    out_config.compilerOptions.target = ts.ScriptTarget[out_config.compilerOptions.target];
+                }
+
+                // конвертация из абсолютных путей в относительные
+                if (out_config.compilerOptions.rootDir) {
+                    out_config.compilerOptions.rootDir = path.relative(base_dir, out_config.compilerOptions.rootDir);
+                }
+                if (out_config.compilerOptions.outDir) {
+                    // tsBuildInfoFile будет сохранятся в outDir (если он указан) в соответствующем подкаталоге
+                    out_config.compilerOptions.tsBuildInfoFile = path.relative(
+                        base_dir,
+                        path.resolve(
+                            out_config.compilerOptions.outDir,
+                            path.relative(
+                                src,
+                                this.abs_dirname
+                            ),
+                            this.name.replace(/\.ts$/, '.tsbuildinfo')
+                        )
+                    );
+                    out_config.compilerOptions.outDir = path.relative(base_dir, out_config.compilerOptions.outDir);
+                }
+                if (out_config.compilerOptions.baseUrl) {
+                    out_config.compilerOptions.baseUrl = path.relative(base_dir, out_config.compilerOptions.baseUrl);
+                }
+                if (out_config.compilerOptions.typeRoots) {
+                    if (out_config.compilerOptions.typeRoots.length > 0) {
+                        out_config.compilerOptions.typeRoots = out_config.compilerOptions.typeRoots.map(p => path.relative(base_dir, p));
+                    }
+                }
+
+                out_config.files = [this.abs_path, ...resolved_depends].map(p => path.relative(base_dir, p));
+
+            } catch (e) {
+                throw e;
+            }
+
+            return out_config;
+        };
+
+        /** Сохранение конфигурации */
+        static save_out_tsconfig = (src) => {
+            try {
+                fs.mkdirSync(path.dirname(this.out_tsconfig), { recursive: true });
+                fs.writeFileSync(
+                    this.out_tsconfig,
+                    JSON.stringify(
+                        this.make_out_options(
+                            this.extract_dependencies(), src
+                        ),
+                        null, 2)
+                );
+            } catch (e) {
+                throw new Error('\x1B[1;31mОшибка при сохранении tsconfig.json\x1B[0m\n', { cause: e });
+            }
+        };
+
+        static {
+            Object.freeze(this);
+            Object.freeze(this.prototype);
+        }
+    };
+
+    // =============================================================================
+    // Основная работа
+    // ============================================================================
+
+    // удаляем старый tsconfig, если он есть
+    try {
+        fs.rmSync(test_file.out_tsconfig);
+    } catch (e) { }
+
+
+    try {
+        test_file.syntax_check();
+        // test_file.semantic_check();
+    } catch (e) {
+        console.error(e);
+        process.exit(1);
+    }
+    test_file.save_out_tsconfig(project.src);
+
+
+    console.info(`\x1B[1;32mсохранена в '${path.relative(project.root, test_file.out_tsconfig)}'\x1B[0m`);
+    process.exit(0);
+
+} catch (e) {
+    console.error(e);
+    process.exit(1);
+}

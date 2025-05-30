@@ -1,0 +1,80 @@
+#!/usr/bin/env -S node
+'use strict';
+/** @file: dev-scripts/compile */
+/*
+ *
+ */;
+import fs from 'fs';
+import path from 'path';
+import * as child_process from 'child_process';
+
+// ======================================================================
+// Запуск скрипта с аргументами командной строки
+
+if (!process.argv[2]) {
+    console.error('\n\x1B[1;31mНеобходимо указать путь к файлу\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!fs.existsSync(process.argv[2])) {
+    console.error('\n\x1B[1;31mФайл должен существовать\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!fs.statSync(process.argv[2]).isFile()) {
+    console.error('\n\x1B[1;31mОжидается регулярный файл\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!process.argv[2].endsWith('.ts')) {
+    console.error('\n\x1B[1;31mОжидается файл с расширением .ts\x1B[0m\n');
+    process.exit(1);
+}
+
+// ======================================================================
+
+const project_root = (() => {
+
+    try {
+        return child_process.execSync('git rev-parse --show-toplevel',
+            {
+                cwd: path.dirname(path.resolve(process.argv[2])),
+                encoding: 'utf-8'
+            }).trim();
+    } catch (e) {
+        throw new Error('\n\x1B[1;31mНе удалось определить корень проекта через Git. Убедитесь, что скрипт запущен внутри Git-репозитория.\x1B[0m\n', { cause: e });
+    }
+})();
+
+const test_file = path.resolve(project_root, process.argv[2]);
+console.info(`\nКомпиляция файла \x1B[4m${test_file}\x1B[0m`);
+
+// путь относительно src/
+const relative_src_path = path.relative(path.join(project_root, 'src'), test_file);
+
+// tsconfig file
+const tsconfig_file = path.join(project_root, 'tsconfig', relative_src_path.replace(/\.ts$/, '.tsconfig.json'));
+
+if (!fs.existsSync(tsconfig_file)) {
+    console.error(`\n\x1B[1;31mНе найден tsconfig для ${relative_src_path}. Продолжать невозможно\x1B[0m\n`);
+    process.exit(1);
+}
+
+try {
+    const rel_tsconfig = path.relative(project_root, tsconfig_file);
+    console.log(child_process.execSync(`npx -- tsc --build ${rel_tsconfig} --locale ru --pretty`,
+        {
+            cwd: project_root,
+            encoding: 'utf-8'
+        }).trim());
+
+    console.log(child_process.execSync(`${path.join('dev-scripts', 'chmod')} build`,
+        {
+            cwd: project_root,
+            encoding: 'utf-8'
+        }).trim());
+
+    console.info('\x1B[1;32mкомпиляция завершена\x1B[0m');
+} catch (e) {
+    console.error(e.stdout);
+}

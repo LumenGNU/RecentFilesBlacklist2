@@ -1,0 +1,55 @@
+#!/usr/bin/env -S node
+'use strict';
+/** @file: dev-scripts/list_tasks */
+/** @license: https://www.gnu.org/licenses/gpl.txt */
+
+import fs from 'fs';
+import path from 'path';
+import * as child_process from 'child_process';
+
+// ======================================================================
+const project_root = (() => {
+    try {
+        return child_process.execSync('git rev-parse --show-toplevel', {
+            encoding: 'utf-8'
+        }).trim();
+    } catch (e) {
+        throw new Error('\n\x1B[1;31mНе удалось определить корень проекта через Git.\x1B[0m\n', { cause: e });
+    }
+})();
+
+const tasks_file = path.join(project_root, '.vscode', 'tasks.json');
+
+if (!fs.existsSync(tasks_file)) {
+    console.error('\n\x1B[1;31mФайл .vscode/tasks.json не найден\x1B[0m\n');
+    process.exit(1);
+}
+
+try {
+    const tasks_content = fs.readFileSync(tasks_file, 'utf-8');
+    // Удаляем комментарии для парсинга JSON
+
+    //const clean_content = tasks_content.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    //const tasks_config = JSON.parse(clean_content);
+
+    const tasks_config = JSON.parse(tasks_content);
+
+    if (!tasks_config.tasks || tasks_config.tasks.length === 0) {
+        console.info('\n\x1B[33mЗадачи не найдены\x1B[0m\n');
+        process.exit(0);
+    }
+
+    console.info(`\n\x1B[1;32mСписок задач проекта:\x1B[0m\n`);
+
+    tasks_config.tasks.forEach(task => {
+        console.info(` - ${task.label}`);
+        if (task.detail) {
+            console.info(`   \x1B[36m${task.detail}\x1B[0m`);
+        }
+        console.info('');
+    });
+
+} catch (e) {
+    console.error(`\n\x1B[1;31mОшибка чтения файла задач: ${e.message}\x1B[0m\n`);
+    process.exit(1);
+}

@@ -1,0 +1,111 @@
+#!/usr/bin/env -S node
+'use strict';
+/** @file: dev-scripts/chmod */
+/*
+ *
+ */;
+import fs from 'fs';
+import path from 'path';
+import * as child_process from 'child_process';
+
+// ======================================================================
+// Запуск скрипта с аргументами командной строки
+
+if (!process.argv[2]) {
+    console.error('\n\x1B[1;31mНеобходимо указать путь к каталогу\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!fs.existsSync(process.argv[2])) {
+    console.error('\n\x1B[1;31mКаталог должен существовать\x1B[0m\n');
+    process.exit(1);
+}
+
+if (!fs.statSync(process.argv[2]).isDirectory()) {
+    console.error('\n\x1B[1;31mОжидается каталог\x1B[0m\n');
+    process.exit(1);
+}
+
+// ======================================================================
+
+const project_root = (() => {
+
+    try {
+        return child_process.execSync('git rev-parse --show-toplevel',
+            {
+                cwd: path.resolve(process.argv[2]),
+                encoding: 'utf-8'
+            }).trim();
+    } catch (e) {
+        throw new Error('\n\x1B[1;31mНе удалось определить корень проекта через Git. Убедитесь, что скрипт запущен внутри Git-репозитория.\x1B[0m\n', { cause: e });
+    }
+})();
+
+const test_dir = path.resolve(project_root, process.argv[2]);
+// console.info(`\nУстановка прав для файлов в \x1B[4m${test_dir}\x1B[0m\n`);
+
+try {
+
+
+    // Рекурсивная функция обхода каталога
+    function process_directory(dir_path) {
+        const entries = fs.readdirSync(dir_path, { withFileTypes: true });
+
+        for (const entry of entries) {
+            const full_path = path.join(dir_path, entry.name);
+
+            if (entry.isDirectory()) {
+                // Рекурсивно обрабатываем подкаталоги
+                process_directory(full_path);
+            } else if (entry.isFile()) {
+                try {
+                    // Читаем в буфер первые 256 байт
+                    const fd = fs.openSync(full_path, 'r');
+                    const buffer = Buffer.alloc(256); // 256 байт достаточно для шебанга
+                    const bytes_read = fs.readSync(fd, buffer, 0, 256, 0);
+                    fs.closeSync(fd);
+
+                    const content = buffer.toString('utf-8', 0, bytes_read);
+                    const first_line = content.split('\n')[0];
+
+                    // Проверяем наличие шебанга
+                    if (/^#!.+/.test(first_line)) {
+                        // Устанавливаем права на выполнение
+                        const current_stats = fs.statSync(full_path);
+                        const current_mode = current_stats.mode;
+
+                        // Проверяем есть ли уже право на выполнение для владельца
+                        const has_execute = (current_mode & 0o100) !== 0;
+                        if (!has_execute) {
+                            // Добавляем право на выполнение только если его нет
+                            const new_mode = current_mode | 0o100;
+                            fs.chmodSync(full_path, new_mode);
+                            console.info(` - chmod +x для: ${path.relative(project_root, full_path)}`);
+                        }
+
+                    }
+                } catch (file_error) {
+                    // Игнорируем ошибки чтения отдельных файлов (например, бинарные файлы)
+                    // console.debug(`Пропущен файл ${full_path}: ${file_error.message}`);
+                }
+            }
+        }
+    }
+
+    process_directory(test_dir);
+
+    // if (processed_files > 0) {
+    //     console.info(`\n\x1B[1;32mУстановлены права для ${processed_files} файлов\x1B[0m`);
+    // } else {
+    //     console.info(`\n\x1B[1;32mВсе файлы обработаны, изменения не вносились\x1B[0m`);
+    // }
+
+
+} catch (e) {
+    console.error(`\n\x1B[1;31mОшибка обработки каталога: ${e.message}\x1B[0m`);
+    process.exit(1);
+}
+
+
+
+process.exit(0);
