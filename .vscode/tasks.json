@@ -1,0 +1,185 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Линтинг Текущего Файла",
+            "detail": "Линтинг открытого в редакторе файла",
+            "icon": {
+                "id": "go-to-search"
+            },
+            "type": "process",
+            "command": "dev-scripts/lint_file",
+            "args": [
+                "${file}"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "group": "lint"
+            }
+        },
+        {
+            "label": "Создать TSConfig Для Текущего Файла",
+            "detail": "Сгенерировать tsconfig для открытого в редакторе файла",
+            "icon": {
+                "id": "gear"
+            },
+            "type": "process",
+            "command": "dev-scripts/tsconfig_for",
+            "args": [
+                "${file}"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "group": "build"
+            }
+        },
+        {
+            "label": "Установить Права Доступа Для Скомпилированных Файлов",
+            "detail": "Устанавливает корректные права доступа для файлов в папке build",
+            "icon": {
+                "id": "shield"
+            },
+            "type": "process",
+            "command": "dev-scripts/chmod",
+            "args": [
+                "${workspaceFolder}/build"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "group": "build"
+            }
+        },
+        {
+            "label": "Скомпелировать Текущий Файл",
+            "detail": "Компиляция открытого в редакторе файла",
+            "dependsOn": [
+                "Создать TSConfig Для Текущего Файла"
+            ],
+            "dependsOrder": "sequence",
+            "icon": {
+                "id": "tools"
+            },
+            "type": "process",
+            "command": "dev-scripts/compile",
+            "args": [
+                "${file}"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false,
+                "group": "build"
+            }
+        },
+        {
+            "label": "Скомпелировать Схемы",
+            "detail": "Компиляция схем в директории schemas/",
+            "icon": {
+                "id": "table"
+            },
+            "type": "shell",
+            "command": "glib-compile-schemas",
+            "args": [
+                "--strict",
+                "${workspaceFolder}/schemas/"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false,
+                "group": "build"
+            }
+        },
+        {
+            "label": "Очистить Папку build",
+            "detail": "Очистка папки build",
+            "icon": {
+                "id": "trash"
+            },
+            "type": "shell",
+            "command": "[[ -d build ]] && rm -rf build/** || true",
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "group": "clean",
+                "close": true
+            }
+        },
+        {
+            "label": "Очистить Папку tsconfig",
+            "detail": "Очистка папки tsconfig",
+            "icon": {
+                "id": "trash"
+            },
+            "type": "shell",
+            "command": "[[ -d tsconfig ]] && rm -rf tsconfig/** || true",
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "group": "clean",
+                "close": true
+            }
+        },
+        {
+            "label": "Очистить Все",
+            "detail": "Очистка всех папок",
+            "dependsOn": [
+                "Очистить Папку build",
+                "Очистить Папку tsconfig"
+            ],
+            "dependsOrder": "sequence",
+            "icon": {
+                "id": "trash"
+            },
+            "type": "shell",
+            "command": "true",
+            "problemMatcher": [],
+            "presentation": {
+                "echo": false,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": true,
+                "group": "clean",
+                "close": true
+            }
+        }
+    ]
+}
