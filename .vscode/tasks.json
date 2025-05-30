@@ -100,20 +100,17 @@
                 "id": "table"
             },
             "type": "shell",
-            "command": "glib-compile-schemas",
-            "args": [
-                "--strict",
-                "${workspaceFolder}/schemas/"
-            ],
+            "command": "glib-compile-schemas --strict ${workspaceFolder}/schemas/ && echo 'Схемы скомпилированы'",
             "problemMatcher": [],
             "presentation": {
                 "echo": false,
                 "reveal": "always",
                 "focus": false,
-                "panel": "shared",
+                "panel": "new",
                 "showReuseMessage": false,
-                "clear": false,
-                "group": "build"
+                "clear": true,
+                "group": "build",
+                "close": true
             }
         },
         {
