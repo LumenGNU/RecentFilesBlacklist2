@@ -1,0 +1,84 @@
+{
+    "name": "recent-files-blacklist",
+    "displayName": "Recent Files Blacklist",
+    "version": "0.0.0",
+    "description": "Recent Files Blacklist for GNOME Shell",
+    "ExtensionMetadata": {
+        "uuid": "recent-files-blacklist@lumen.gnu.com",
+        "shell-version": [
+            "45"
+        ],
+        "url": "https://github.com/LumenGNU/RecentFilesBlacklist2",
+        "gettext-domain": "example@gjs.guide",
+        "settings-schema": "org.gnome.shell.extensions.recent-files-blacklist",
+        "session-modes": [],
+        "donations": {
+            "github": "",
+            "custom": []
+        },
+        "version": 2,
+        "version-name": "1.1"
+    },
+    "type": "module",
+    "private": true,
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/LumenGNU/RecentFilesBlacklist2.git"
+    },
+    "author": "lumen <lumen.gnu@gmail.com>",
+    "license": "LGPL-3.0-or-later",
+    "bugs": {
+        "url": "https://github.com/LumenGNU/RecentFilesBlacklist2/issues"
+    },
+    "homepage": "https://github.com/LumenGNU/RecentFilesBlacklist2#readme",
+    "sideEffects": false,
+    "projectStructure": {
+        "root/": {
+            "description": "Root directory",
+            "files": {
+                "tsconfig.json": {
+                    "description": "TypeScript configuration file"
+                },
+                "eslint.config.js": {
+                    "description": "ESLint configuration file"
+                }
+            },
+            "src/": {
+                "description": "Source files root directory",
+                "service/": {
+                    "description": "Source files for RecentFilesService",
+                    "files": {
+                        "RecentFilesService.ts": {
+                            "description": "Main source file for RecentFilesService"
+                        }
+                    }
+                }
+            },
+            "schemas/": {
+                "description": "GSettings schemas directory"
+            },
+            "build/": {
+                "description": "Builded files root directory"
+            },
+            "dist/": {
+                "description": "Distribution files directory"
+            }
+        }
+    },
+    "devDependencies": {
+        "@anthropic-ai/claude-code": "^0.2.114",
+        "@eslint/js": "^9.27.0",
+        "@girs/giounix-2.0": "^2.0.0-4.0.0-beta.23",
+        "@girs/gjs": "^4.0.0-beta.23",
+        "@girs/glibunix-2.0": "^2.0.0-4.0.0-beta.23",
+        "@girs/gnome-shell": "^48.0.2",
+        "@types/jasmine": "^5.1.8",
+        "eslint": "^9.27.0",
+        "madge": "^8.0.0",
+        "typescript": "^5.8.3",
+        "typescript-eslint": "^8.32.1"
+    },
+    "scripts": {
+        "Список задач проекта": "./dev-scripts/list_tasks"
+    }
+}
