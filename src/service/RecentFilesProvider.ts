@@ -1,9 +1,20 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.0.0 */
+/** @version: 1.0.2 */
 /**
  * @changelog
+ *
+ * # 1.0.2 - Рефакторинг
+ *         - Теперь все свойства будут генерировать DecommissionedError
+ *           после decommission().
+ *         - ensure_monitoring_inactive теперь отменяет возможный
+ *           запланированный сигнал (cancel), а не принудительно
+ *           отправляет его (flush).
+ *
+ * # 1.0.1 - Документация
+ *
  * # 1.0.0 - Стабильная версия
+ *
  * # 0.99.1 - Исправлены и дополнены типы ошибок
  *  */
 
@@ -16,19 +27,22 @@ import {
     PromiseControllers
 } from '../shared/common-types.js';
 import {
+    NO_HANDLER
+} from '../shared/common-types.js';
+import {
     Decommissionable,
     DecommissionedError,
     decommission_signals
 } from '../shared/Decommissionable.interface.js';
-import { DelayedSignal } from '../shared/DelayedSignal.js';
-import { GObjectDecorator } from '../shared/gobject-decorators.js';
+import {
+    DelayedSignal
+} from '../shared/DelayedSignal.js';
+import {
+    GObjectDecorator
+} from '../shared/gobject-decorators.js';
 
-import { NO_HANDLER } from '../shared/common-types.js';
 
-/** Состояния мониторинга истории файлов.
- *
- * @enum {number}
- * @readonly */
+/** Состояния мониторинга истории файлов. */
 export enum MonitoringState {
     /** Мониторинг не запрошен и не активен.
      * Начальное состояние или состояние после вызова `withdraw_monitoring()`. */
@@ -63,7 +77,7 @@ export class HistoryDisabledError extends Error {
     }
 }
 
-/** Ошибка при очистке очереди обработки */
+/** Ошибка, которая передается при очистке очереди обработки */
 export class QueueCleanupError extends Error {
     constructor(message = 'Queue cleanup error', options?: ErrorOptions) {
         super(message, options);
@@ -87,7 +101,7 @@ export class DuplicateUriError extends Error {
     }
 }
 
-/** ## RecentFilesProvider - взаимодействие с системным менеджером недавних файлов в GNOME.
+/** RecentFilesProvider - взаимодействие с системным менеджером недавних файлов в GNOME.
  *
  * ### Описание
  *
@@ -96,6 +110,42 @@ export class DuplicateUriError extends Error {
  * - Получение пути к файлу истории (через свойство `history_file_path`)
  * - Удаление элементов из истории (через метод `remove_item`)
  * - И другие возможности
+ *
+ * ### API
+ *
+ * #### Параметры конструктора:
+ * - `debounce_timeout?: number` Таймаут дебаунса. Это значение будет принято только если оно больше DEBOUNCE_TIMEOUT
+ * - `recent_manager?: Gtk.RecentManager` Инстанс системного менеджера истории (в основном для тестирования)
+ * - `settings_manager?: Gtk.Settings` Инстанс системного менеджера настроек (в основном для тестирования)
+ *
+ * #### Сигналы:
+ * - `'notify::state'` Уведомление о изменении состояния
+ * - `'history-changed'` Сигнал. Сообщает об факте изменениях в истории
+ * - `'notify::recent-files-enabled'` Уведомление о изменении доступности истории
+ * - `'notify::history-items-count'` Уведомление о возможном изменении размера истории
+ *
+ * #### Константы:
+ * - `DEBOUNCE_TIMEOUT` Минимальное значения для таймаута дебаунса сигнала `'history-changed'`
+ *
+ * #### Свойства:
+ * - `recent_files_enabled: boolean` Включена ли история в системе. Только чтение.
+ * - `history_file_path: string` Путь к файлу-истории. Только чтение.
+ * - `history_items_count: number` Количество записей в истории. Только чтение.
+ * - `state: MonitoringState` Состояние мониторинга. Только чтение.
+ *
+ * #### Методы:
+ * - `request_monitoring(): void` Запрос на запуск слежения за историей.
+ * - `withdraw_monitoring(): void` Останавливает мониторинг или отменяет запрос на запуск мониторинга.
+ * - `remove_item(uri: string): Promise<void>` Удаляет указанный файл из системной истории недавних файлов.
+ * - `get_items(start_index = 0, items_count = 0): Promise<RecentItem[]>` Получает список недавно использованных файлов из системной истории.
+ * - `decommission(): void` Выводит объект из эксплуатации.
+ *
+ * #### Ошибки:
+ * - `HistoryDisabledError` Ошибка, возникающая при попытке операции с отключенной историей файлов
+ * - `QueueCleanupError` Ошибка, которая передается при очистке очереди обработки
+ * - `InvalidUriError` Ошибка при работе с недопустимым URI
+ * - `DuplicateUriError` Ошибка при попытке добавить в очередь уже существующий URI
+ * - `DecommissionedError`
  *
  * ### Архитектура
  *
@@ -120,37 +170,6 @@ export class DuplicateUriError extends Error {
  *
  * - **Защита от неправильного использования**: Деструктивный метод `decommission`
  *   намеренно делает объект непригодным для дальнейшего использования
- *
- * ~~~
- *
- *         GObject.Object
- *               ▲
- *               │
- *               │                                                  Сигналы:
- * ┌──────────────────────────────────────────────────────────────┐   'history-changed'
- * │ RecentFilesProvider                                          ├───────────────────────
- * ├──────────────────────────────────────────────────────────────┤
- * │                                                              │
- * │ Свойства:                                                    │
- * │   state: MonitoringState RO                                  │ Состояние мониторинга (вычислимое свойство)
- * │   recent_files_enabled: boolean RO                           │ Включена ли история в системе
- * │   history_file_path: string RO                               │ Путь к файлу-истории
- * │   history_items_count: number RO                             │ Количество записей в истории
- * │                                                              │
- * │───────────────────────────────────────────────────────────── │
- * │                                                              │
- * │ Методы:                                                      │
- * │   request_monitoring()                                       │ Запрос на запуск мониторинга
- * │   withdraw_monitoring()                                      │ Остановка мониторинга или отмена запроса
- * │                                                              │
- * │   remove_item(uri): Promise<void>                            │ Удаление элемента из истории
- * │   get_items(start_index, items_count): Promise<RecentItem[]> │ Получение списка элементов истории
- * │                                                              │
- * │   decommission(): void                                       │ Выводит объект из эксплуатации
- * │                                                              │
- * └──────────────────────────────────────────────────────────────┘
- *
- * ~~~
  *
  * ### Состояния
  *
@@ -396,7 +415,8 @@ export class DuplicateUriError extends Error {
 })
 export class RecentFilesProvider extends GObject.Object implements Decommissionable {
 
-    static readonly DEBOUNCE_TIMEOUT = 330;
+    /** Минимальное значения для таймаута дебаунса сигнала `'history-changed'` */
+    static DEBOUNCE_TIMEOUT = 330 as const;
 
     /** Отложенный сигнал */
     private delayed_signal: {
@@ -424,13 +444,11 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
     };
 
     /** Контекст состояния */
-    private state_context: {
-        /** ID обработчика уведомления об изменении состояния */
-        handler_id: HandlerID,
-        /** Флаг запроса мониторинга */
-        monitoring_requested: boolean,
-        /** "Предыдущее" состояние */
-        previous_state: MonitoringState,
+    // Инициализация контекста состояния
+    private state_context = {
+        handler_id: NO_HANDLER as HandlerID,
+        monitoring_requested: false,
+        previous_state: undefined as unknown as MonitoringState, // синхронизируемся с текущим состоянием
     };
 
     /** Системный менеджер истории файлов */
@@ -440,36 +458,31 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
     private default_settings_manager: Gtk.Settings | null;
 
     /** Constructor */
-    constructor(constructProperties: Partial<{
+    constructor(
         /** Таймаут дебаунса. Это значение будет принято только если оно больше DEBOUNCE_TIMEOUT */
-        debounce_timeout: number,
+        debounce_timeout?: number,
         /** Инстанс системного менеджера истории (в основном для тестирования) */
         recent_manager?: Gtk.RecentManager,
         /** Инстанс системного менеджера настроек (в основном для тестирования) */
         settings_manager?: Gtk.Settings,
-    }> = {}) {
+    ) {
 
         super();
 
         // Инициализация системных менеджеров
-        this.default_recent_manager = constructProperties.recent_manager || Gtk.RecentManager.get_default();
-        this.default_settings_manager = constructProperties.settings_manager || Gtk.Settings.get_default();
+        this.default_recent_manager = recent_manager || Gtk.RecentManager.get_default();
+        this.default_settings_manager = settings_manager || Gtk.Settings.get_default();
 
         if (!this.default_settings_manager) {
             throw new Error('GTK Settings unavailable: display server environment may be missing');
         }
 
-        // Инициализация контекста состояния
-        this.state_context = {
-            handler_id: NO_HANDLER,
-            monitoring_requested: false,
-            previous_state: this.state, // синхронизируемся с текущим состоянием
-        };
+        this.state_context.previous_state = this.state;
 
         // Инициализация отложенного сигнала
         this.delayed_signal = {
             emitter: new DelayedSignal(
-                Math.max(RecentFilesProvider.DEBOUNCE_TIMEOUT, (constructProperties.debounce_timeout ?? 0))
+                Math.max(RecentFilesProvider.DEBOUNCE_TIMEOUT, (debounce_timeout ?? 0))
             ),
             handler_id: NO_HANDLER,
         };
@@ -503,12 +516,15 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * Свойство отражает системную настройку `gtk-recent-files-enabled`.
      * При изменении этой настройки автоматически генерируется уведомление
      * и может измениться состояние мониторинга.
-     *
-     * @readonly */
+     * */
     @GObjectDecorator.BooleanProperty({
         flags: GObject.ParamFlags.READABLE, default_value: false
     })
     public get recent_files_enabled(): boolean {
+        if (this.state_context === undefined) {
+            throw new DecommissionedError();
+        }
+
         return this.default_settings_manager!.gtk_recent_files_enabled;
     }
 
@@ -517,6 +533,10 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         flags: GObject.ParamFlags.READABLE
     })
     public get history_file_path(): string {
+        if (this.state_context === undefined) {
+            throw new DecommissionedError();
+        }
+
         return this.default_recent_manager.filename;
     }
 
@@ -528,6 +548,9 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         default_value: 0
     })
     public get history_items_count(): number {
+        if (this.state_context === undefined) {
+            throw new DecommissionedError();
+        }
         return this.default_recent_manager.size;
     }
 
@@ -541,6 +564,10 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         default_value: MonitoringState.INACTIVE
     })
     public get state(): MonitoringState {
+        if (this.state_context === undefined) {
+            throw new DecommissionedError();
+        }
+
         if (this.state_context) {
             if (!this.state_context.monitoring_requested) {
                 return MonitoringState.INACTIVE;
@@ -551,6 +578,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
             }
         }
         return MonitoringState.INACTIVE;
+
     }
 
     // #endregion
@@ -865,7 +893,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      *
      * @fires this#'history-changed' После истечения таймаута дебаунса */
     private retarded_history_changed() {
-        this.delayed_signal.emitter.pending_invoke('history-changed');
+        this.delayed_signal.emitter.pending_invoke();
     }
 
     /** Остановка слежения за историей.
@@ -879,8 +907,11 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
             }
             this.handlers_ids.recent_manager = NO_HANDLER;
 
-            // Принудительно отправить сигнал 'history-changed', если был запланирован отложенный сигнал
-            this.delayed_signal.emitter.flush();
+            // // Принудительно отправить сигнал 'history-changed', если был запланирован отложенный сигнал
+            // this.delayed_signal.emitter.flush();
+            // @todo или... или... - определится что правильней
+            // отменить возможный запланированный сигнал 'history-changed'
+            this.delayed_signal.emitter.cancel();
         }
     }
 
@@ -924,7 +955,9 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
 
     //#endregion
 
-    /** Завершает работу с объектом. Освобождает все ресурсы, используемые объектом.
+    /** Выводит объект из эксплуатации.
+     *
+     * Завершает работу с объектом. Освобождает все ресурсы, используемые объектом.
      *
      * @warning После вызова этого метода объект становится непригодным для использования!
      * Все попытки вызвать методы объекта приведут к ошибкам.
