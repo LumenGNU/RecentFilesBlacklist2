@@ -1,9 +1,17 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.0.1 */
+/** @version: 1.1.0 */
 /**
  * @changelog
+ *
+ * # 1.1.0 - Отказ от ошибки EmptyCriteriaError
+ *         - Исправлено поведение при пустом списке критериев
+ *         - get criteria возвращает пустой массив при пустом списке критериев
+ *
+ * # 1.0.2 - Документация
+ *
  * # 1.0.1 - Исправлены и дополнены типы ошибок
+ *
  * # 1.0.0 - Стабильная версия
  */
 
@@ -12,7 +20,9 @@ import GLib from 'gi://GLib?version=2.0';
 
 import { Decommissionable, DecommissionedError } from '../shared/Decommissionable.interface.js';
 import { GObjectDecorator } from '../shared/gobject-decorators.js';
+import { RecentItem } from './RecentFilesProvider.js';
 
+/** Тип критерия */
 export type CriteriaType =
     /** Фильтр на основе glob-шаблона */
     'glob';
@@ -86,17 +96,6 @@ export interface SinsInfo {
     label: string,
 }
 
-/** Информация о файле для проверки.
- *
- * Содержит URI файла и его отображаемую версию. */
-export interface ItemsInfo {
-    /** URI файла */
-    uri: string,
-    /** Отображаемый путь файла для пользователя.
-     * Может быть null для некорректных записей */
-    uri_display: string | null,
-};
-
 /** Режимы проверки файлов.
  *
  * Определяет баланс между скоростью обработки и нагрузкой на систему. */
@@ -151,45 +150,6 @@ export class ProcessAbortError extends Error {
     constructor(message = 'Process aborted', options?: ErrorOptions) {
         super(message, options);
         this.name = 'ProcessAbortError';
-    }
-}
-
-/** Ошибка отсутствия критериев фильтрации.
- *
- * Выбрасывается при попытке запустить проверку файлов методом `do_process()`
- * без предварительной установки критериев через `set_criteria()`.
- *
- * Эта ошибка указывает на неправильный порядок инициализации или на то,
- * что критерии были сброшены но не установлены заново.
- *
- * @extends {Error}
- *
- * @example
- * ```typescript
- * const inquisitor = new Inquisitor();
- *
- * // Попытка проверки без критериев
- * try {
- *     await inquisitor.do_process(files); // Выбросит EmptyCriteriaError
- * } catch (error) {
- *     if (error instanceof EmptyCriteriaError) {
- *         console.error('Необходимо сначала установить критерии');
- *
- *         // Устанавливаем критерии и повторяем
- *         await inquisitor.set_criteria([
- *             { type: 'glob', pattern: '*.tmp' }
- *         ]);
- *         await inquisitor.do_process(files); // Теперь работает
- *     }
- * }
- * ```
- *
- * @see {@link Inquisitor.set_criteria} Для установки критериев
- * @see {@link Inquisitor.criteria} Для проверки текущих критериев */
-export class EmptyCriteriaError extends Error {
-    constructor(message = 'Empty criteria', options?: ErrorOptions) {
-        super(message, options);
-        this.name = 'EmptyCriteriaError';
     }
 }
 
@@ -287,6 +247,35 @@ export class CriteriaValidateError extends Error {
  *
  * ## Архитектура и интеграция
  *
+ * ### API
+ *
+ * #### Параметры конструктора:
+ *  - Не принимает параметров
+ *
+ * #### Сигналы:
+ * - `'matched-result'` Генерируется после проверки каждого файла, если были совпадения.
+ *   Параметры
+ *   - `URI: string` URI файла
+ *   - `mode: Thoroughness` режим проверки
+ *   - `sins: SinsInfo[]` массив совпавших критериев
+ *
+ * #### Константы:
+ * - `MAX_CACHE_SIZE` Максимальный размер кэша для хранения URI "чистых" файлов.
+ *
+ * #### Свойства:
+ * - `criteria: CompiledCriteriaSpec<CriteriaType>[] | undefined` Возвращает текущие скомпилированные критерии фильтрации. Только чтение.
+ *
+ * #### Методы:
+ * - `set_criteria(criteria: CriteriaSpec<CriteriaType>[]): Promise<void>` Устанавливает новые критерии фильтрации.
+ * - `process_abort(msg): boolean` Немедленно прерывает текущий процесс проверки.
+ * - `do_process(items_info: RecentItem[], thoroughness: Thoroughness = Thoroughness.lazy): Promise<void>` Запускает проверку списка.
+ * - `decommission(): void` Выводит объект из эксплуатации.
+ *
+ * #### Ошибки:
+ * - `CriteriaValidateError` - ошибка валидации при установке критериев
+ * - `ProcessAbortError` - процесс был прерван вызовом `process_abort()`
+ * - `DecommissionedError` - попытка использовать выведенный из эксплуатации объект
+ *
  * Класс спроектирован как компонент сервиса. Он не управляет
  * списками или критериями самостоятельно, а получает их извне.
  * Результаты проверки передаются через сигнал `'matched-result'`, позволяя
@@ -324,7 +313,7 @@ export class CriteriaValidateError extends Error {
  *
  * ### Thoroughness.lazy (Ленивый)
  * - Останавливает проверку файла после первого совпадения
- * - Вставляет паузы между проверками файлов (`PROCESS_INTERVAL` мс)
+ * - Вставляет паузы между проверками (`PROCESS_INTERVAL` мс)
  * - Минимизирует нагрузку на систему
  * - Подходит для фоновой обработки без нагрузки на систему
  *
@@ -336,12 +325,16 @@ export class CriteriaValidateError extends Error {
  * - Использует `Set` для быстрой проверки наличия
  * - Максимальный размер ограничен `MAX_CACHE_SIZE`
  * - При превышении лимита удаляется самая старая запись (FIFO)
- * - Кэш сбрасывается при изменении критериев через `set_criteria()`
+ * - Кэш сбрасывается при изменении критериев `set_criteria()`
  * - Файлы из кэша пропускаются при последующих проверках
  *   если критерии не менялись
  *
- * Это особенно эффективно при частых проверках одного и того же
+ * Это особенно /и только/ эффективно при частых проверках одного и того же
  * списка данных с небольшими изменениями если критерии не меняются.
+ *
+ * Эта стратегия хорошо работает со списком истории, поскольку системный
+ * менеджер всегда отдает полный список файлов в истории, а изменения в нем,
+ * как правило, затрагивают только одну запись, или вообще отсутствуют.
  *
  * ## Критерии фильтрации
  *
@@ -375,12 +368,13 @@ export class CriteriaValidateError extends Error {
  * Это помогает выявлять некорректные записи в списке недавних файлов,
  * которые невозможно проверить на совпадение критериям.
  *
- * ## Обработка ошибок
+ * Критерий `'lint'` будет срабатывать всегда, независимо от режима, даже если
+ * критерии не заданы.
  *
- * - `EmptyCriteriaError` - попытка запустить проверку без критериев
- * - `CriteriaValidateError` - ошибка валидации при установке критериев
- * - `ProcessAbortError` - процесс был прерван вызовом `process_abort()`
- * - `DecommissionedError` - попытка использовать выведенный из эксплуатации объект
+ * Критерий `'lint'` проверяется до проверки каждого другого критерия, и, если
+ * он срабатывает, проверка критериев прекращается. Такое поведение обусловлено
+ * тем, что срабатывание критерия `'lint'` означает (как правило) невозможность
+ * получения из данных информации, достаточной для проверки других критериев.
  *
  * ## Производительность
  *
@@ -388,27 +382,17 @@ export class CriteriaValidateError extends Error {
  * - Кэширует результаты для избежания повторных проверок
  * - В ленивом режиме распределяет нагрузку по времени
  * - Поддерживает прерывание длительных операций
- *
- * ## Сигналы
- *
- * ### `'matched-result'`
- * Генерируется для каждого файла, соответствующего хотя бы одному критерию.
- *
- * Параметры:
- * - `uri: string` - URI проверенного файла
- * - `mode: Thoroughness` - режим, в котором выполнялась проверка
- * - `sins: SinsInfo[]` - массив информации о совпавших критериях
  * */
 @GObjectDecorator.Class({
     Signals: {
-        /** Генерируется после проверки каждого файла, если были совпадения. */
+        /** Генерируется после проверки каждого файла, если были совпадения с критериями. */
         'matched-result': {
             param_types: [
-                /** matched-result::uri:string - URI файла */
+                /** matched-result::uri:string URI файла */
                 GObject.TYPE_STRING,
-                /** matched-result::mode:Thoroughness - режим проверки */
+                /** matched-result::mode:Thoroughness режим проверки */
                 GObject.TYPE_UINT,
-                /** matched-result::sins:SinsInfo[] - массив совпавших критериев */
+                /** matched-result::sins:SinsInfo[] массив совпавших критериев */
                 GObject.TYPE_JSOBJECT,
             ],
         },
@@ -427,9 +411,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * Значение 1000 выбрано в соответствии с ограничением GNOME на
      * количество недавних файлов, что обеспечивает оптимальный баланс
      * между использованием памяти и эффективностью кэширования.
-     *
-     * @readonly
-     * @static
      *
      * @example
      * ```typescript
@@ -459,9 +440,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * - **10-50 мс**: для очень больших списков или слабых систем
      * - **0 мс**: только для режима thorough (быстрая обработка)
      *
-     * @readonly
-     * @static
-     *
      * @example
      * ```typescript
      * // Расчёт времени обработки 1000 файлов
@@ -484,8 +462,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *
      * - `undefined` - нет активной проверки
      * - `GLib.Source` - идёт процесс проверки
-     *
-     * @private */
+     * */
     private tribunal_source = undefined as GLib.Source | undefined;
 
     /** Скомпилированный набор критериев фильтрации.
@@ -497,7 +474,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * - Пустой массив означает отсутствие критериев
      * - `undefined` будет означать, что объект выведен из эксплуатации (@see {@link decommission} `decommission()`)
      *
-     * @private
      * @see {@link set_criteria} Установка критериев
      * @see {@link criteria} Публичный геттер */
     private eligibility_criteria = [] as CompiledCriteriaSpec<CriteriaType>[];
@@ -511,7 +487,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * - Ограничен размером MAX_CACHE_SIZE
      * - Использует FIFO для вытеснения старых записей
      *
-     * @private
      * @see {@link add_to_trustworthy_list} Добавление в кэш */
     private trustworthy_list = new Set<string>();
 
@@ -520,7 +495,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * Хранит прогресс обработки списка и
      * функцию отклонения "текущего" Promise для возможности прерывания.
      *
-     * @private
      * @property {number} current - Индекс текущего обрабатываемого файла
      * @property {Function|undefined} reject - Функция отклонения Promise из do_process() */
     private process_protocol = {
@@ -548,12 +522,10 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *
      * _GObject-свойство_: `ParamFlags.READABLE`
      *
-     * @returns Массив установленных критериев или `undefined`, если критерии
-     *          не установлены или список пуст
+     * @returns Массив скомпилированных критериев
      *
      * @throws {ObjectDecommissionedError} Если объект выведен из эксплуатации
      *
-     * @readonly
      * @example
      * ```typescript
      * const criteria = inquisitor.criteria;
@@ -571,7 +543,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             throw new DecommissionedError();
         }
 
-        return this.eligibility_criteria.length > 0 ? this.eligibility_criteria : undefined;
+        return this.eligibility_criteria;
     }
 
     /** Устанавливает новые критерии фильтрации.
@@ -615,8 +587,9 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *     }
      * }
      * ```
-     * */
+     * */ // @todo Нужны более четкие описания ошибок валидации и информация о проблемном критерии
     public set_criteria(criteria: CriteriaSpec<CriteriaType>[]): Promise<void> {
+        // @fixme Множественные вызовы! Прерывать предыдущий! Атомарность!
         return new Promise<void>((resolve, reject) => {
 
             // Останавливаем текущую проверку при изменении критериев
@@ -721,26 +694,30 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
     public process_abort(msg = 'Process aborted'): boolean {
         if (this.tribunal_source) {
 
+            clearInterval(this.tribunal_source);
+            this.tribunal_source = undefined;
+
             if (this.process_protocol.reject) {
                 this.process_protocol.reject(new ProcessAbortError(msg));
                 this.process_protocol.reject = undefined;
+            } else {
+                console.assert(false, 'process_abort: Процесс работал и был прерван, но reject === undefined');
             }
 
-            clearInterval(this.tribunal_source);
-            this.tribunal_source = undefined;
             return true;
         }
         return false;
     }
 
-    /** Запускает асинхронную проверку списка файлов.
+    /** Запускает асинхронную проверку переданного списка.
      *
      * Проверяет каждый файл из списка на соответствие установленным критериям.
      * Для файлов с совпадениями генерирует сигнал `'matched-result'`.
      *
      * Файлы без совпадений добавляются в кэш для оптимизации повторных проверок.
      *
-     * Если в момент вызова уже выполняется другая проверка, она будет прервана.
+     * Если в момент вызова уже выполняется другая проверка, она будет прервана
+     * с ошибкой `ProcessAbortError('New process will be initiated')`.
      *
      * @param items_info Список файлов для проверки
      * @param [thoroughness=Thoroughness.lazy] Режим проверки:
@@ -749,7 +726,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *
      * @returns {Promise<void>} Promise, который разрешается после проверки всех файлов
      *
-     * @throws {EmptyCriteriaError} Если критерии не установлены
      * @throws {ProcessAbortError} Если проверка была прервана вызовом `process_abort()`
      *
      * @fires 'matched-result' Для каждого файла с совпадениями.
@@ -771,22 +747,15 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *     await inquisitor.do_process(files, Thoroughness.thorough);
      *     console.log('Проверка завершена');
      * } catch (error) {
-     *     if (error instanceof EmptyCriteriaError) {
-     *         console.error('Сначала установите критерии');
-     *     }
+     *     ...
      * }
      * ``` */
     public do_process(
-        items_info: ItemsInfo[],
+        items_info: RecentItem[],
         thoroughness: Thoroughness = Thoroughness.lazy
     ): Promise<void> {
         // Прерываем текущую обработку, если она запущена
         this.process_abort('New process will be initiated');
-
-        // Если критериев нет - нечего проверять
-        if (this.eligibility_criteria.length === 0) {
-            return Promise.reject(new EmptyCriteriaError(`Empty criteria`));
-        }
 
         this.process_protocol.current = 0;
 
