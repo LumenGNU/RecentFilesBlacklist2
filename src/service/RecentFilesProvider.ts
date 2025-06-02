@@ -1,8 +1,11 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.0.2 */
+/** @version: 1.1.0 */
 /**
  * @changelog
+ *
+ * # 1.1.0 - Сигнал `'history-changed'` переименован
+ *           в `'history-changes-settled'`
  *
  * # 1.0.2 - Рефакторинг
  *         - Теперь все свойства будут генерировать DecommissionedError
@@ -52,7 +55,7 @@ export enum MonitoringState {
      * При включении истории автоматически переходит в ACTIVE. */
     PENDING,
     /** Мониторинг запрошен и активен.
-     * Объект отслеживает изменения и генерирует сигналы `history-changed`. */
+     * Объект отслеживает изменения и генерирует сигналы `history-changes-settled`. */
     ACTIVE
 }
 
@@ -106,7 +109,7 @@ export class DuplicateUriError extends Error {
  * ### Описание
  *
  * Класс предоставляет централизованный интерфейс для работы с недавно использованными файлами:
- * - Мониторинг изменений в истории файлов (через публичный сигнал `'history-changed'`)
+ * - Мониторинг изменений в истории файлов (через публичный сигнал `'history-changes-settled'`)
  * - Получение пути к файлу истории (через свойство `history_file_path`)
  * - Удаление элементов из истории (через метод `remove_item`)
  * - И другие возможности
@@ -119,13 +122,13 @@ export class DuplicateUriError extends Error {
  * - `settings_manager?: Gtk.Settings` Инстанс системного менеджера настроек (в основном для тестирования)
  *
  * #### Сигналы:
+ * - `'history-changes-settled'` Сигнал. Сообщает об факте изменениях в истории
  * - `'notify::state'` Уведомление о изменении состояния
- * - `'history-changed'` Сигнал. Сообщает об факте изменениях в истории
  * - `'notify::recent-files-enabled'` Уведомление о изменении доступности истории
  * - `'notify::history-items-count'` Уведомление о возможном изменении размера истории
  *
  * #### Константы:
- * - `DEBOUNCE_TIMEOUT` Минимальное значения для таймаута дебаунса сигнала `'history-changed'`
+ * - `DEBOUNCE_TIMEOUT` Минимальное значения для таймаута дебаунса сигнала `'history-changes-settled'`
  *
  * #### Свойства:
  * - `recent_files_enabled: boolean` Включена ли история в системе. Только чтение.
@@ -280,7 +283,7 @@ export class DuplicateUriError extends Error {
  *
  * // Запуск мониторинга изменений истории
  * provider.request_monitoring();
- * provider.connect('history-changed', () => {
+ * provider.connect('history-changes-settled', () => {
  *     console.log('История файлов изменилась');
  * });
  *
@@ -394,7 +397,7 @@ export class DuplicateUriError extends Error {
  *
  * ### Производительность
  *
- * - Дебаунс сигналов: минимум `DEBOUNCE_TIMEOUT` мс между событиями `history-changed`
+ * - Дебаунс сигналов: минимум `DEBOUNCE_TIMEOUT` мс между событиями `history-changes-settled`
  * - Очередь удаления: обрабатывается последовательно через setInterval(0)
  * - Получение элементов: O(n) где n - количество запрошенных элементов
  * - Массовые операции могут временно блокировать UI
@@ -410,12 +413,12 @@ export class DuplicateUriError extends Error {
     GTypeFlags: GObject.TypeFlags.FINAL,
     Signals: {
         /** Сообщает об изменениях в истории */
-        'history-changed': {}
+        'history-changes-settled': {}
     },
 })
 export class RecentFilesProvider extends GObject.Object implements Decommissionable {
 
-    /** Минимальное значения для таймаута дебаунса сигнала `'history-changed'` */
+    /** Минимальное значения для таймаута дебаунса сигнала `'history-changes-settled'` */
     static DEBOUNCE_TIMEOUT = 330 as const;
 
     /** Отложенный сигнал */
@@ -487,7 +490,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
             handler_id: NO_HANDLER,
         };
 
-        // дебаунс для сигнала 'history-changed'
+        // дебаунс для сигнала 'history-changes-settled'
         this.delayed_signal.handler_id = this.delayed_signal.emitter.connect(
             'occurred',
             this.history_changed_cb.bind(this)
@@ -605,16 +608,16 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * Даже если сразу поставлено в очередь несколько файлов, их удаление
      * будет выполнено последовательно в цикле событий GLib.
      *
-     * NOTICE: Сигнал `history-changed` во время выполнения очереди:
+     * NOTICE: Сигнал `history-changes-settled` во время выполнения очереди:
      *         Множественные выбросы сигнала 'changed' от Gtk.RecentManager будут объединены в один,
-     *         и будет выброшено только одно событие 'history-changed' в конце
+     *         и будет выброшено только одно событие 'history-changes-settled' в конце
      *         обработки очереди (с задержкой). Что позволяет избежать и спама и
      *         возможной потери информации о изменении истории произошедшей
      *         во время выполнения очереди.
      *
-     * NOTICE: Сигнал `history-changed` после выполнения очереди:
+     * NOTICE: Сигнал `history-changes-settled` после выполнения очереди:
      *         После завершения очереди, если в историю были внесены изменения,
-     *         обязательно будет выброшен сигнал 'history-changed'.
+     *         обязательно будет выброшен сигнал 'history-changes-settled'.
      *         Этот момент следует учитывать при проектировании взаимодействий
      *         с этим классом.
      *
@@ -628,7 +631,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * @throws {Gtk.RecentManagerError} Ошибки Gtk.RecentManager
      * @throws {*Error} Другие ошибки
      *
-     * @fires this#'history-changed'
+     * @fires this#'history-changes-settled'
      *
      * @example
      * try {
@@ -804,16 +807,16 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         this.notify('state'); // уведомление о изменении состояния
     }
 
-    /** Эмиттит заторможенный сигнал `history-changed`.
+    /** Эмиттит заторможенный сигнал `history-changes-settled`.
      *
      * Вызывается после истечения таймаута дебаунса.
      * Также уведомляет об изменении количества элементов.
      *
      * @fires notify::history-items-count
-     * @fires history-changed */
+     * @fires history-changes-settled */
     private history_changed_cb(): void {
         this.notify('history-items-count'); // уведомление о возможном изменении размера истории
-        this.emit('history-changed'); // сигнал 'history-changed'
+        this.emit('history-changes-settled'); // сигнал 'history-changes-settled'
     };
 
     //#endregion
@@ -870,7 +873,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
 
     /** Запуск слежения за историей.
      *
-     * @fires this#'history-changed' */
+     * @fires this#'history-changes-settled' */
     private ensure_monitoring_active(): void {
 
         if (this.handlers_ids.recent_manager === NO_HANDLER) {
@@ -880,25 +883,25 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                 this.retarded_history_changed.bind(this)
             );
         }
-        // Принудительно отправить сигнал 'history-changed' после подключения
+        // Принудительно отправить сигнал 'history-changes-settled' после подключения
         this.delayed_signal.emitter.invoke();
 
     }
 
-    /** Планирует отправку отложенного сигнала `'history-changed'`.
+    /** Планирует отправку отложенного сигнала `'history-changes-settled'`.
      *
      * Метод является обработчиком сигнала `'changed'` от `Gtk.RecentManager`.
      * Использует механизм отложенных сигналов для предотвращения спама уведомлениями
      * при массовых изменениях истории (например, при импорте файлов).
      *
-     * @fires this#'history-changed' После истечения таймаута дебаунса */
+     * @fires this#'history-changes-settled' После истечения таймаута дебаунса */
     private retarded_history_changed() {
         this.delayed_signal.emitter.pending_invoke();
     }
 
     /** Остановка слежения за историей.
      *
-     * @fires this#'history-changed' */
+     * @fires this#'history-changes-settled' */
     private ensure_monitoring_inactive(): void {
 
         if (this.handlers_ids.recent_manager > NO_HANDLER) {
@@ -907,10 +910,10 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
             }
             this.handlers_ids.recent_manager = NO_HANDLER;
 
-            // // Принудительно отправить сигнал 'history-changed', если был запланирован отложенный сигнал
+            // // Принудительно отправить сигнал 'history-changes-settled', если был запланирован отложенный сигнал
             // this.delayed_signal.emitter.flush();
             // @todo или... или... - определится что правильней
-            // отменить возможный запланированный сигнал 'history-changed'
+            // отменить возможный запланированный сигнал 'history-changes-settled'
             this.delayed_signal.emitter.cancel();
         }
     }
