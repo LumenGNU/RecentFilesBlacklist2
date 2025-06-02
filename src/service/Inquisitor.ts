@@ -1,8 +1,11 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.1.0 */
+/** @version: 1.2.0 */
 /**
  * @changelog
+ *
+ * # 1.2.0 - Реализации конкурентно-безопасной
+ *           архитектуры для set_criteria (не правильной)
  *
  * # 1.1.0 - Отказ от ошибки EmptyCriteriaError
  *         - Исправлено поведение при пустом списке критериев
@@ -223,6 +226,18 @@ export class CriteriaValidateError extends Error {
     constructor(message = 'Invalid criteria', options?: ErrorOptions) {
         super(message, options);
         this.name = 'CriteriaValidateError';
+    }
+}
+
+
+/** Ошибка отмены операции установки критериев.
+ *
+ * Выбрасывается когда операция `set_criteria()` была отменена
+ * более новым вызовом того же метода. */
+export class SetCriteriaCancelledError extends Error {
+    constructor(message = 'Criteria operation was cancelled', options?: ErrorOptions) {
+        super(message, options);
+        this.name = 'SetCriteriaCancelledError';
     }
 }
 
@@ -503,6 +518,8 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         reject: undefined as ((reason?: Error) => void) | undefined
     };
 
+    #criteria_operation_id = 0;
+
     /** Создаёт новый экземпляр `Inquisitor`.
      *
      * Объект создается с пустым списком критериев.
@@ -548,6 +565,8 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
     /** Устанавливает новые критерии фильтрации.
      *
+     * Реализации конкурентно-безопасного API в условиях асинхронной среды.
+     *
      * Будет выполнено:
      * 1. Прерывает текущую проверку (если выполняется)
      * 2. Сбрасывает старые критерии
@@ -589,39 +608,52 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * ```
      * */ // @todo Нужны более четкие описания ошибок валидации и информация о проблемном критерии
     public set_criteria(criteria: CriteriaSpec<CriteriaType>[]): Promise<void> {
-        // @fixme Множественные вызовы! Прерывать предыдущий! Атомарность!
+
+        // Новая операция отменяет все предыдущие
+        const operation_id = ++this.#criteria_operation_id;
+
         return new Promise<void>((resolve, reject) => {
 
-            // Останавливаем текущую проверку при изменении критериев
+            // -- немедленные действия (неотменяемые) --
             this.process_abort('Stopping for criteria update');
-            // Сбрасываем старые критерии
-            // Даже если валидация завершится с ошибкой, старые критерии не должны использоваться
+
+            // атомарно: обнуляем критерии сразу
             this.eligibility_criteria = [];
             this.notify('criteria');
-
-            // Очищаем кэш "чистых" файлов
             this.trustworthy_list.clear();
 
-            // временный массив для скомпилированных критериев
+            // -- отменяемые действия --
+            // Работаем во временном массиве
             const _eligibility_criteria = [] as CompiledCriteriaSpec<CriteriaType>[];
 
             try {
-
+                // Валидация
                 if (!Array.isArray(criteria)) {
                     throw new CriteriaValidateError('Criterion must be an Array');
                 }
 
-                // Компилируем критерии, заполняем во временный массив
+                // Компиляция во временный массив
                 for (const criterion of criteria) {
+
+                    // Проверка актуальности перед каждым критерием
+                    if (this.#criteria_operation_id !== operation_id) {
+                        throw new SetCriteriaCancelledError('Superseded by newer operation');
+                    }
+
+                    // #region валидация и компиляция criterion в temp_criteria...
+
+                    // проверка на объект
                     if (typeof criterion !== 'object' || criterion === null) {
                         throw new Error('Criterion must be an object');
                     }
+
                     if (criterion.label) {
                         if (typeof criterion.label !== 'string') {
                             // если указана метка, то она должна быть строкой
-                            throw new Error(`Invalid label: '${criterion.label}'. Label must be a string`);
+                            throw new CriteriaValidateError(`Invalid label: '${criterion.label}'. Label must be a string`);
                         }
                     }
+
                     switch (criterion.type) {
                         case 'glob':
                             if (typeof (criterion as CriteriaSpec<'glob'>).pattern === 'string'
@@ -642,20 +674,37 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                         default:
                             throw new Error(`Unsupported criteria type: '${criterion.type}'`);
                     }
+
+                    // #endregion
+
+                    // // Проверка актуальности после каждого критерия
+                    // if (this.#criteria_operation_id !== operation_id) {
+                    //     throw new SetCriteriaCancelledError('Superseded by newer operation');
+                    // }
                 }
+
+                // === финальная атомарная установка ===
+                if (this.#criteria_operation_id === operation_id) {
+                    // атомарно: устанавливаем полный валидный список
+                    // перемещаем, а не копируем:
+                    this.eligibility_criteria = _eligibility_criteria.splice(0, Infinity);
+
+                    if (this.eligibility_criteria.length > 0) {
+                        this.notify('criteria');
+                    }
+                    resolve();
+                } else {
+                    // Отменена на последнем этапе
+                    reject(new SetCriteriaCancelledError('Cancelled before final assignment'));
+                }
+
             } catch (error) {
-                reject(new CriteriaValidateError('Validation error. Criteria not be compiled', { cause: error }));
+                if (error instanceof SetCriteriaCancelledError) {
+                    reject(error);
+                } else {
+                    reject(new CriteriaValidateError('Validation error', { cause: error }));
+                }
             }
-
-            // перемещаем, а не копируем:
-            this.eligibility_criteria = _eligibility_criteria.splice(0, Infinity);
-
-            if (this.eligibility_criteria.length > 0) {
-                // уведомляем о смене критериев
-                this.notify('criteria');
-            }
-
-            resolve();
         });
     }
 
@@ -768,7 +817,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             // Запускаем интервал для обработки
             // --------------------------------
             this.tribunal_source = setInterval(() => {
-
+                // @todo Стоит весь колбек поместить в трай блок?
                 // Проверяем завершение ...
                 if (this.process_protocol.current >= items_info.length) {
 
@@ -802,9 +851,8 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                                     }
                                     break;
                                 default:
-                                    ((type: never) => {
-                                        console.assert(false, `Неизвестный CriteriaType тип: ${type}`);
-                                    })(criterion.type);
+                                    const _type: never = criterion.type;
+                                    console.assert(false, `Неизвестный CriteriaType тип: ${_type}`);
                                     break;
                             }
 
