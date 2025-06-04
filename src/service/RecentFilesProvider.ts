@@ -1,8 +1,11 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.1.0 */
+/** @version: 1.1.1 */
 /**
  * @changelog
+ *
+ * # 1.1.1 - Стабильная версия
+ *         - Рефакторинг
  *
  * # 1.1.0 - Сигнал `'history-changed'` переименован
  *           в `'history-changes-settled'`
@@ -28,6 +31,9 @@ import Gtk from 'gi://Gtk?version=4.0';
 import {
     HandlerID,
     PromiseControllers
+} from '../shared/common-types.js';
+import type {
+    RecentItem
 } from '../shared/common-types.js';
 import {
     NO_HANDLER
@@ -58,18 +64,6 @@ export enum MonitoringState {
      * Объект отслеживает изменения и генерирует сигналы `history-changes-settled`. */
     ACTIVE
 }
-
-/** Структура элемента истории недавних файлов полученная из `Gtk.RecentInfo` */
-export interface RecentItem {
-    /** URI файла
-     * URI файла в формате схемы (file://, smb://, ftp:// и т.д.).
-     * Всегда присутствует и является уникальным идентификатором. */
-    uri: string;
-    /** Отображаемое имя файла (может быть null, если недоступно)
-     * Может быть null для недоступных или удалённых файлов.
-     * Обычно содержит просто путь/имя файла. */
-    uri_display?: string | null;
-};
 
 // Специфичные типы ошибок
 /** Ошибка, возникающая при попытке операции с отключенной историей файлов */
@@ -679,11 +673,11 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                         this.default_recent_manager.remove_item(uri);
 
                         // разрешаем промис
-                        this.remove_process_context.promise_controllers.resolve();
+                        this.remove_process_context.promise_controllers.resolve!(); // @todo
 
                     } catch (error) {
                         // отклоняем промис
-                        this.remove_process_context.promise_controllers.reject(error as Error);
+                        this.remove_process_context.promise_controllers.reject!(error as Error); // @todo
                     }
 
                     // удаляем контроллеры
@@ -945,11 +939,11 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         if (this.remove_process_context.remove_queue.size > 0) {
             const cleanup_error = new QueueCleanupError(msg);
             for (const [_uri, promise_controllers] of this.remove_process_context.remove_queue) {
-                promise_controllers.reject(cleanup_error);
+                promise_controllers.reject!(cleanup_error);
             }
             // Отклоняем возможный ожидающий промис
             if (this.remove_process_context.promise_controllers) {
-                this.remove_process_context.promise_controllers.reject(cleanup_error);
+                this.remove_process_context.promise_controllers.reject!(cleanup_error);
                 this.remove_process_context.promise_controllers = undefined;
             }
             this.remove_process_context.remove_queue = new Map();
