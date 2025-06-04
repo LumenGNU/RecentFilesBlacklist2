@@ -1,8 +1,14 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.2.0 */
+/** @version: 1.3.1 */
 /**
  * @changelog
+ *
+ * # 1.3.1 - Стабильная версия
+ *         - Рефакторинг
+ *
+ * # 1.3.0 - Реализации конкурентно-безопасной
+ *           архитектуры для set_criteria (правильной)
  *
  * # 1.2.0 - Реализации конкурентно-безопасной
  *           архитектуры для set_criteria (не правильной)
@@ -21,9 +27,22 @@
 import GObject from 'gi://GObject?version=2.0';
 import GLib from 'gi://GLib?version=2.0';
 
-import { Decommissionable, DecommissionedError } from '../shared/Decommissionable.interface.js';
-import { GObjectDecorator } from '../shared/gobject-decorators.js';
-import { RecentItem } from './RecentFilesProvider.js';
+import {
+    Decommissionable,
+    DecommissionedError
+} from '../shared/Decommissionable.interface.js';
+import {
+    GObjectDecorator
+} from '../shared/gobject-decorators.js';
+import type {
+    RecentItem,
+    SourceID,
+    PromiseControllers
+} from '../shared/common-types.js';
+import {
+    NO_SOURCE,
+} from '../shared/common-types.js';
+
 
 /** Тип критерия */
 export type CriteriaType =
@@ -228,7 +247,6 @@ export class CriteriaValidateError extends Error {
         this.name = 'CriteriaValidateError';
     }
 }
-
 
 /** Ошибка отмены операции установки критериев.
  *
@@ -470,15 +488,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * @see {@link do_process} Использование в процессе проверки */
     static PROCESS_INTERVAL = 2 as const;
 
-    /** Источник таймера для интервальной обработки файлов.
-     *
-     * Хранит ссылку на активный интервал, созданный через setInterval().
-     * Используется для контроля процесса проверки и его прерывания.
-     *
-     * - `undefined` - нет активной проверки
-     * - `GLib.Source` - идёт процесс проверки
-     * */
-    private tribunal_source = undefined as GLib.Source | undefined;
+
 
     /** Скомпилированный набор критериев фильтрации.
      *
@@ -508,17 +518,47 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
     /** Состояние текущего процесса проверки.
      *
      * Хранит прогресс обработки списка и
-     * функцию отклонения "текущего" Promise для возможности прерывания.
-     *
-     * @property {number} current - Индекс текущего обрабатываемого файла
-     * @property {Function|undefined} reject - Функция отклонения Promise из do_process() */
-    private process_protocol = {
-        /** Текущий индекс */
-        current: 0 as number,
-        reject: undefined as ((reason?: Error) => void) | undefined
+     * контроллер "текущего" Promise для возможности прерывания.
+     * */
+    private process_operation = {
+        /** Источник таймера для интервальной обработки файлов.
+         *
+         * Хранит ссылку на активный интервал, созданный через `setInterval()`.
+         * Используется для контроля процесса проверки и его прерывания.
+         *
+         * - `null` - нет активной проверки
+         * - `GLib.Source` - идёт процесс проверки
+         * */
+        source: NO_SOURCE as SourceID,
+        /** Текущий индекс для проверки */
+        current_index: 0 as number,
+        /** Контроллер Promise текущей операции */
+        controller: {
+            reject: undefined,
+            resolve: undefined
+        } as PromiseControllers<void>,
     };
 
-    #criteria_operation_id = 0;
+
+    private criteria_operation = {
+        /** Источник таймера для интервальной обработки критериев.
+         *
+         * Хранит ссылку на активный интервал, созданный через `setInterval()`.
+         * Используется для контроля процесса проверки и его прерывания.
+         *
+         * - `null` - нет активной проверки
+         * - `GLib.Source` - идёт процесс проверки
+         * */
+        source: NO_SOURCE as SourceID,
+        /** Текущий индекс для проверки */
+        current_index: 0 as number,
+        /** Контроллер Promise текущей операции */
+        controller: {
+            reject: undefined,
+            resolve: undefined
+        } as PromiseControllers<void>,
+    };
+
 
     /** Создаёт новый экземпляр `Inquisitor`.
      *
@@ -565,14 +605,23 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
     /** Устанавливает новые критерии фильтрации.
      *
-     * Реализации конкурентно-безопасного API в условиях асинхронной среды.
+     * Реализации конкурентно-безопасного API в условиях среды GJS.
+     *
+     * Старается гарантировать атомарность:
+     * - только актуальная операция  может записать в `this.eligibility_criteria`.
+     * - Все отклоненные попытки установить критерии оставляют
+     *   `this.eligibility_criteria` пустым.
+     * - Все ошибки валидации оставляют `this.eligibility_criteria` пустым.
      *
      * Будет выполнено:
-     * 1. Прерывает текущую проверку (если выполняется)
+     * 1. Прерывает текущую проверку (`do_process()`, если выполняется)
      * 2. Сбрасывает старые критерии
      * 3. Очищает кэш проверенных ("чистых") файлов
      * 4. Валидирует и компилирует новые критерии
      * 5. Устанавливает новые критерии (если валидация успешна)
+     *
+     * Нет специализированного метода для прерывания установки критериев,
+     * используй `set_criteria([])`.
      *
      * @param criteria Массив критериев для установки
      *
@@ -587,6 +636,10 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *         - Если указан неподдерживаемый тип критерия
      *
      *         _Конкретная причина доступна через `error.cause`_
+     *
+     * @throws // @todo перечислить остальные ошибки
+     *
+     * @throws {ObjectDecommissionedError} Если объект выведен из эксплуатации
      *
      * @fires notify::criteria Может генерироваться дважды:
      *        1. После сброса старых критериев (будет генерироваться в любом случае)
@@ -610,101 +663,118 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
     public set_criteria(criteria: CriteriaSpec<CriteriaType>[]): Promise<void> {
 
         // Новая операция отменяет все предыдущие
-        const operation_id = ++this.#criteria_operation_id;
 
         return new Promise<void>((resolve, reject) => {
+
+            // отменяем предыдущую операцию, если она выполняется
+            if (this.criteria_operation.source) {
+                this.criteria_operation.controller.reject!(new SetCriteriaCancelledError('Superseded by newer operation'));
+                clearInterval(this.criteria_operation.source);
+                this.criteria_operation.source = null;
+            }
+            // отклоняем предыдущий промис
 
             // -- немедленные действия (неотменяемые) --
             this.process_abort('Stopping for criteria update');
 
             // атомарно: обнуляем критерии сразу
             this.eligibility_criteria = [];
-            this.notify('criteria');
+            this.notify('criteria'); // уведомление о сбросе критериев
             this.trustworthy_list.clear();
-
-            // -- отменяемые действия --
             // Работаем во временном массиве
             const _eligibility_criteria = [] as CompiledCriteriaSpec<CriteriaType>[];
 
-            try {
-                // Валидация
+            { // начинаем проверки
+
+                // Валидация. должен быть массив
                 if (!Array.isArray(criteria)) {
-                    throw new CriteriaValidateError('Criterion must be an Array');
+                    reject(new CriteriaValidateError('Criterion must be an Array'));
                 }
 
-                // Компиляция во временный массив
-                for (const criterion of criteria) {
+                // сохраняем, настраиваемся и начинаем цикл валидации
+                this.criteria_operation.controller.reject = reject;
+                this.criteria_operation.controller.resolve = resolve;
+                this.criteria_operation.current_index = 0;
 
-                    // Проверка актуальности перед каждым критерием
-                    if (this.#criteria_operation_id !== operation_id) {
-                        throw new SetCriteriaCancelledError('Superseded by newer operation');
-                    }
+                this.criteria_operation.source = setInterval(() => {
 
-                    // #region валидация и компиляция criterion в temp_criteria...
+                    try {
 
-                    // проверка на объект
-                    if (typeof criterion !== 'object' || criterion === null) {
-                        throw new Error('Criterion must be an object');
-                    }
+                        // проверяем что все критерии уже проверены
+                        if (this.criteria_operation.current_index >= criteria.length) {
 
-                    if (criterion.label) {
-                        if (typeof criterion.label !== 'string') {
-                            // если указана метка, то она должна быть строкой
-                            throw new CriteriaValidateError(`Invalid label: '${criterion.label}'. Label must be a string`);
+                            // финальное атомарное переливание массива
+                            this.eligibility_criteria = _eligibility_criteria.splice(0, Infinity);
+
+                            if (this.eligibility_criteria.length > 0) {
+                                this.notify('criteria'); // уведомление о новых критериях
+                            }
+
+                            this.criteria_operation.controller.resolve!();
+                            clearInterval(this.criteria_operation.source!);
+                            this.criteria_operation.source = null;
+                            return;
                         }
-                    }
 
-                    switch (criterion.type) {
-                        case 'glob':
-                            if (typeof (criterion as CriteriaSpec<'glob'>).pattern === 'string'
-                                && (criterion as CriteriaSpec<'glob'>).pattern.length > 0) {
-                                try {
+                        const criterion = criteria[this.criteria_operation.current_index];
+
+
+                        // #region валидация и компиляция criterion в temp_criteria...
+
+                        // проверка на объект
+                        if (typeof criterion !== 'object' || criterion === null) {
+                            throw new CriteriaValidateError('Criterion must be non null object');
+                        }
+
+                        if (criterion.label) {
+                            if (typeof criterion.label !== 'string') {
+                                // если указана метка, то она должна быть строкой
+                                throw new CriteriaValidateError(`Invalid label: '${criterion.label}'. Label must be a string`);
+                            }
+                        }
+
+                        switch (criterion.type) {
+                            case 'glob':
+                                if (typeof (criterion as CriteriaSpec<'glob'>).pattern === 'string'
+                                    && (criterion as CriteriaSpec<'glob'>).pattern.length > 0) {
+
                                     _eligibility_criteria.push({
                                         type: 'glob',
                                         pattern_spec: new GLib.PatternSpec((criterion as CriteriaSpec<'glob'>).pattern),
                                         label: (criterion as CriteriaSpec<'glob'>).label ?? (criterion as CriteriaSpec<'glob'>).pattern
                                     } as CompiledCriteriaSpec<'glob'>);
-                                } catch (error) {
-                                    throw new Error(`Failed to compile glob pattern: '${(criterion as CriteriaSpec<'glob'>).pattern}'`, { cause: error });
+
+                                } else {
+                                    throw new CriteriaValidateError(`Invalid glob pattern: '${(criterion as CriteriaSpec<'glob'>).pattern}'. Glob pattern must be a non-empty string`);
                                 }
-                            } else {
-                                throw new CriteriaValidateError(`Invalid glob pattern: '${(criterion as CriteriaSpec<'glob'>).pattern}'. Glob pattern must be a non-empty string`);
-                            }
-                            break;
-                        default:
-                            throw new Error(`Unsupported criteria type: '${criterion.type}'`);
+                                break;
+                            default:
+                                throw new CriteriaValidateError(`Unsupported criteria type: '${criterion.type}'`);
+                        }
+
+                        // #endregion
+
+                        // переходим к следующему
+                        this.criteria_operation.current_index++;
+
+                    } catch (error) {
+                        if (error instanceof SetCriteriaCancelledError) {
+                            this.criteria_operation.controller.reject!(error);
+                        } else if (error instanceof CriteriaValidateError) {
+                            this.criteria_operation.controller.reject!(error);
+                        } else {
+                            this.criteria_operation.controller.reject!(new Error('Failed to set criteria: Unknown error.', { cause: error }));
+                        }
+
+                        clearInterval(this.criteria_operation.source!);
+                        this.criteria_operation.source = null;
+                        return;
                     }
 
-                    // #endregion
+                }, 0);
 
-                    // // Проверка актуальности после каждого критерия
-                    // if (this.#criteria_operation_id !== operation_id) {
-                    //     throw new SetCriteriaCancelledError('Superseded by newer operation');
-                    // }
-                }
-
-                // === финальная атомарная установка ===
-                if (this.#criteria_operation_id === operation_id) {
-                    // атомарно: устанавливаем полный валидный список
-                    // перемещаем, а не копируем:
-                    this.eligibility_criteria = _eligibility_criteria.splice(0, Infinity);
-
-                    if (this.eligibility_criteria.length > 0) {
-                        this.notify('criteria');
-                    }
-                    resolve();
-                } else {
-                    // Отменена на последнем этапе
-                    reject(new SetCriteriaCancelledError('Cancelled before final assignment'));
-                }
-
-            } catch (error) {
-                if (error instanceof SetCriteriaCancelledError) {
-                    reject(error);
-                } else {
-                    reject(new CriteriaValidateError('Validation error', { cause: error }));
-                }
             }
+
         });
     }
 
@@ -741,17 +811,13 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * }
      * ``` */
     public process_abort(msg = 'Process aborted'): boolean {
-        if (this.tribunal_source) {
+        if (this.process_operation.source) {
 
-            clearInterval(this.tribunal_source);
-            this.tribunal_source = undefined;
+            clearInterval(this.process_operation.source);
+            this.process_operation.source = null;
 
-            if (this.process_protocol.reject) {
-                this.process_protocol.reject(new ProcessAbortError(msg));
-                this.process_protocol.reject = undefined;
-            } else {
-                console.assert(false, 'process_abort: Процесс работал и был прерван, но reject === undefined');
-            }
+            this.process_operation.controller.reject!(new ProcessAbortError(msg));
+            this.process_operation.controller.reject = undefined;
 
             return true;
         }
@@ -806,31 +872,29 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         // Прерываем текущую обработку, если она запущена
         this.process_abort('New process will be initiated');
 
-        this.process_protocol.current = 0;
+        this.process_operation.current_index = 0;
 
         // Возвращаем Promise
         return new Promise<void>((resolve, reject) => {
 
             // Сохраняем контроллеры
-            this.process_protocol.reject = reject;
+            this.process_operation.controller.reject = reject;
+            this.process_operation.controller.resolve = resolve;
 
             // Запускаем интервал для обработки
             // --------------------------------
-            this.tribunal_source = setInterval(() => {
+            this.process_operation.source = setInterval(() => {
                 // @todo Стоит весь колбек поместить в трай блок?
                 // Проверяем завершение ...
-                if (this.process_protocol.current >= items_info.length) {
+                if (this.process_operation.current_index >= items_info.length) {
 
-                    if (this.tribunal_source) {
-                        clearInterval(this.tribunal_source);
-                    }
-                    this.tribunal_source = undefined;
-                    this.process_protocol.reject = undefined;
-                    resolve();
+                    clearInterval(this.process_operation.source!);
+                    this.process_operation.source = null;
+                    this.process_operation.controller.resolve!();
                     return;
                 }
 
-                const current_file = items_info[this.process_protocol.current];
+                const current_file = items_info[this.process_operation.current_index];
                 const sins = [] as SinsInfo[];
 
                 // Проверяем, не находится ли файл уже в кэше чистых,
@@ -842,7 +906,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                         for (const criterion of this.eligibility_criteria!) {
 
                             switch (criterion.type) {
-                                case 'glob':
+                                case 'glob': {
                                     if ((criterion as CompiledCriteriaSpec<'glob'>).pattern_spec.match_string(current_file.uri_display)) {
                                         sins.push({
                                             type: criterion.type,
@@ -850,10 +914,12 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                                         });
                                     }
                                     break;
-                                default:
+                                }
+                                default: {
                                     const _type: never = criterion.type;
                                     console.assert(false, `Неизвестный CriteriaType тип: ${_type}`);
                                     break;
+                                }
                             }
 
                             // Для быстрого режима прерываем после первого совпадения
@@ -880,7 +946,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                 }
 
                 // Переходим к следующему файлу ...
-                this.process_protocol.current++;
+                this.process_operation.current_index++;
 
             }, /* пауза, в зависимости от режима */ thoroughness * Inquisitor.PROCESS_INTERVAL);
         });
@@ -950,6 +1016,13 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
         this.process_abort(`Object is being decommissioned`);
 
+        // отменяем операцию установки критериев, если она выполняется
+        if (this.criteria_operation.source) {
+            clearInterval(this.criteria_operation.source);
+            this.criteria_operation.source = null;
+            this.criteria_operation.controller.reject!(new SetCriteriaCancelledError('Object is being decommissioned'));
+        }
+
         function throw_decommissioned(): never {
             throw new DecommissionedError();
         }
@@ -961,6 +1034,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
         this.eligibility_criteria = (undefined as unknown as typeof this.eligibility_criteria);
         this.trustworthy_list = (undefined as unknown as typeof this.trustworthy_list);
-        this.process_protocol = (undefined as unknown as typeof this.process_protocol);
+        this.process_operation = (undefined as unknown as typeof this.process_operation);
+        this.criteria_operation = (undefined as unknown as typeof this.criteria_operation);
     }
 }
