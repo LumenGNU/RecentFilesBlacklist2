@@ -1,8 +1,10 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 2.0.0 */
+/** @version: 2.0.1 */
 /**
  * @changelog
+ *
+ * # 2.0.1 - Рефакторинг
  *
  * # 2.0.0 - Новая сигнатура get_items()
  *           - Рефакторинг
@@ -41,13 +43,9 @@
 import GObject from 'gi://GObject?version=2.0';
 import GLib from 'gi://GLib?version=2.0';
 import Gtk from 'gi://Gtk?version=4.0';
-
 import {
     HandlerID,
     PromiseControllers
-} from '../shared/common-types.js';
-import type {
-    RecentItem
 } from '../shared/common-types.js';
 import {
     NO_HANDLER
@@ -770,7 +768,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * });
      * ```
      *  */
-    public get_items<T>(converter: (item: Gtk.RecentInfo) => T, start_index = 0, items_count = Infinity): Promise<T[]> {
+    public get_items<T>(converter: (item: Gtk.RecentInfo) => T = (item) => item as T, start_index = 0, items_count = Infinity): Promise<T[]> {
         return new Promise((resolve, reject) => {
             // Проверка включенной истории
             if (!this.recent_files_enabled) {
