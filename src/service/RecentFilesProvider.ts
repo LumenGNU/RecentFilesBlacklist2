@@ -1,8 +1,12 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.3.2 */
+/** @version: 2.0.0 */
 /**
  * @changelog
+ *
+ * # 2.0.0 - Новая сигнатура get_items()
+ *           - Рефакторинг
+ *           - Убраны get_items_* методы
  *
  * # 1.3.2 - Рефакторинг
  *
@@ -717,6 +721,9 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * Метод асинхронно возвращает массив объектов типа `RecentItem`, содержащих
      * информацию о каждом файле в истории недавних файлов GNOME.
      *
+     * @param converter Функция преобразования элемента истории.
+     *                  Принимает элемент истории и возвращает его преобразованное представление.
+     *
      * @param start_index Начальный индекс (0-based)
      *                    Должен быть в диапазоне [0, history_items_count).
      * @param items_count Количество элементов для получения
@@ -735,7 +742,10 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      *
      * @example Получение всех элементов
      * ```typescript
-     * const all_items = await provider.get_items();
+     * const all_items = await provider.get_items((item) => ({
+     *                               uri: item.get_uri(),
+     *                               uri_display: item.get_uri_display()
+     *                           }));
      * console.log(`Всего ${all_items.length} файлов в истории`);
      * ```
      *
@@ -743,40 +753,24 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * ```typescript
      * const page_size = 10;
      * const page = 2;
-     * const items = await provider.get_items(page * page_size, page_size);
+     * const items = await provider.get_items((item) => ([
+     *                   item.get_uri(),
+     *                   item.get_uri_display() ?? ''
+     *               ]), page * page_size, page_size);
      * ```
      *
      * @example Получение 5 файлов
      * ```typescript
-     * const recent_5 = await provider.get_items(0, 5);
+     * const recent_5 = await provider.get_items((item) => ({
+     *                               uri: item.get_uri(),
+     *                               uri_display: item.get_uri_display()
+     *                           }), 0, 5);
      * recent_5.forEach((item, index) => {
      *     console.log(`${index + 1}. ${item.uri_display || item.uri}`);
      * });
      * ```
      *  */
-    public get_items(start_index = 0, items_count = Infinity): Promise<RecentItem[]> {
-        return this._get_items((item) => ({
-            uri: item.get_uri(),
-            uri_display: item.get_uri_display()
-        }), start_index, items_count);
-    };
-
-    /** Получает список недавно использованных файлов из системной истории.
-     * И возвращает массив кортежей (uri, uri_display).
-     *
-     * Ориентирован на отправку по D-Bus.
-     *
-     * @see {@link get_items}
-     * */
-    public get_items_tuple(start_index = 0, items_count = Infinity): Promise<[string, string][]> {
-        return this._get_items((item) => ([
-            item.get_uri(),
-            item.get_uri_display() ?? ''
-        ]), start_index, items_count);
-    };
-
-
-    private _get_items<T>(converter: (item: Gtk.RecentInfo) => T, start_index: number, items_count: number): Promise<T[]> {
+    public get_items<T>(converter: (item: Gtk.RecentInfo) => T, start_index = 0, items_count = Infinity): Promise<T[]> {
         return new Promise((resolve, reject) => {
             // Проверка включенной истории
             if (!this.recent_files_enabled) {
