@@ -1,8 +1,10 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.1.1 */
+/** @version: 1.2.0 */
 /**
  * @changelog
+ *
+ * # 1.2.0 - get_items() теперь асинхронный
  *
  * # 1.1.1 - Стабильная версия
  *         - Рефакторинг
@@ -455,20 +457,20 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
     private default_settings_manager: Gtk.Settings | null;
 
     /** Constructor */
-    constructor(
+    constructor(constructor_options: {
         /** Таймаут дебаунса. Это значение будет принято только если оно больше DEBOUNCE_TIMEOUT */
         debounce_timeout?: number,
         /** Инстанс системного менеджера истории (в основном для тестирования) */
         recent_manager?: Gtk.RecentManager,
         /** Инстанс системного менеджера настроек (в основном для тестирования) */
         settings_manager?: Gtk.Settings,
-    ) {
+    } = {}) {
 
         super();
 
         // Инициализация системных менеджеров
-        this.default_recent_manager = recent_manager || Gtk.RecentManager.get_default();
-        this.default_settings_manager = settings_manager || Gtk.Settings.get_default();
+        this.default_recent_manager = constructor_options.recent_manager ?? Gtk.RecentManager.get_default();
+        this.default_settings_manager = constructor_options.settings_manager ?? Gtk.Settings.get_default();
 
         if (!this.default_settings_manager) {
             throw new Error('GTK Settings unavailable: display server environment may be missing');
@@ -479,7 +481,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         // Инициализация отложенного сигнала
         this.delayed_signal = {
             emitter: new DelayedSignal(
-                Math.max(RecentFilesProvider.DEBOUNCE_TIMEOUT, (debounce_timeout ?? 0))
+                Math.max(RecentFilesProvider.DEBOUNCE_TIMEOUT, (constructor_options.debounce_timeout ?? 0))
             ),
             handler_id: NO_HANDLER,
         };
@@ -710,7 +712,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * @param start_index Начальный индекс (0-based)
      *                    Должен быть в диапазоне [0, history_items_count).
      * @param items_count Количество элементов для получения
-     *                    (0 означает "все элементы после `start_index`")
+     *                    (Infinity означает "все элементы после `start_index`")
      *
      * @returns Промис, разрешающийся массивом элементов истории
      *
@@ -736,7 +738,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * const items = await provider.get_items(page * page_size, page_size);
      * ```
      *
-     * @example Получение последних 5 файлов
+     * @example Получение 5 файлов
      * ```typescript
      * const recent_5 = await provider.get_items(0, 5);
      * recent_5.forEach((item, index) => {
@@ -744,7 +746,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * });
      * ```
      *  */
-    public get_items(start_index = 0, items_count = 0): Promise<RecentItem[]> {
+    public get_items(start_index = 0, items_count = Infinity): Promise<RecentItem[]> {
         return new Promise((resolve, reject) => {
             // Проверка включенной истории
             if (!this.recent_files_enabled) {
@@ -758,23 +760,41 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                 return;
             }
 
-            try {
-                // Получаем все элементы истории
-                const items = this.default_recent_manager.get_items();
+            let interval_source: undefined | GLib.Source;
 
-                // Если запрошен весь список или больше чем есть - берём все
-                if (items_count === 0 || items_count >= (this.default_recent_manager.size - start_index)) {
-                    items_count = Infinity;
+            setTimeout(() => {
+                try {
+                    // Получаем все элементы истории
+                    const items = this.default_recent_manager.get_items().splice(start_index, items_count);
+
+                    const result = [] as RecentItem[];
+
+                    interval_source = setInterval(() => {
+                        const item = items.shift();
+                        if (!item) {
+                            resolve(result);
+                            if (interval_source) {
+                                clearInterval(interval_source);
+                            }
+                            interval_source = undefined;
+                            return;
+                        }
+                        result.push({
+                            uri: item.get_uri(),
+                            uri_display: item.get_uri_display()
+                        });
+                    }, 0);
+
+
+                } catch (error) {
+                    reject(error);
+                } finally {
+                    if (interval_source) {
+                        clearInterval(interval_source);
+                    }
                 }
+            }, 0);
 
-                // Возвращаем срез с указанными параметрами, конвертируя в нужный формат
-                resolve(items.splice(start_index, items_count).map((item: Gtk.RecentInfo) => ({
-                    uri: item.get_uri(),
-                    uri_display: item.get_uri_display()
-                })));
-            } catch (error) {
-                reject(error);
-            }
         });
     };
 
@@ -857,9 +877,8 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                 }
                 break;
             default:
-                ((state: never) => {
-                    console.assert(false, `Unknown state: ${state}`);
-                })(state);
+                const _state: never = state;
+                console.assert(false, `Unknown state: ${_state}`);
         }
 
         this.state_context.previous_state = this.state;
