@@ -1,8 +1,10 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.3.1 */
+/** @version: 1.3.2 */
 /**
  * @changelog
+ *
+ * # 1.3.2 - Рефакторинг
  *
  * # 1.3.1 - Стабильная версия
  *           - Рефакторинг
@@ -753,37 +755,10 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * ```
      *  */
     public get_items(start_index = 0, items_count = Infinity): Promise<RecentItem[]> {
-        return new Promise((resolve, reject) => {
-            // Проверка включенной истории
-            if (!this.recent_files_enabled) {
-                reject(new HistoryDisabledError('Recent history is now disabled, history file is empty'));
-                return;
-            }
-
-            // Проверка корректности индекса
-            if (start_index < 0 || start_index >= this.default_recent_manager.size) {
-                reject(new TypeError(`Start index out of range: ${start_index} (valid range is 0 to ${this.default_recent_manager.size - 1})`));
-                return;
-            }
-
-            setTimeout(() => {
-                try {
-                    // Получаем все элементы истории
-                    const items = this.default_recent_manager.get_items().splice(start_index, items_count);
-
-                    setTimeout(() => {
-                        resolve(items.map(item => ({
-                            uri: item.get_uri(),
-                            uri_display: item.get_uri_display()
-                        })));
-                    }, 0);
-
-                } catch (error) {
-                    reject(error);
-                }
-            }, 0);
-
-        });
+        return this._get_items((item) => ({
+            uri: item.get_uri(),
+            uri_display: item.get_uri_display()
+        }), start_index, items_count);
     };
 
     /** Получает список недавно использованных файлов из системной истории.
@@ -794,6 +769,14 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * @see {@link get_items}
      * */
     public get_items_tuple(start_index = 0, items_count = Infinity): Promise<[string, string][]> {
+        return this._get_items((item) => ([
+            item.get_uri(),
+            item.get_uri_display() ?? ''
+        ]), start_index, items_count);
+    };
+
+
+    private _get_items<T>(converter: (item: Gtk.RecentInfo) => T, start_index: number, items_count: number): Promise<T[]> {
         return new Promise((resolve, reject) => {
             // Проверка включенной истории
             if (!this.recent_files_enabled) {
@@ -813,7 +796,9 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                     const items = this.default_recent_manager.get_items().splice(start_index, items_count);
 
                     setTimeout(() => {
-                        resolve(items.map(item => ([item.get_uri(), item.get_uri_display() ?? ''])));
+                        resolve(items.map(item => (
+                            converter(item)
+                        )));
                     }, 0);
 
                 } catch (error) {
