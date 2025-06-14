@@ -1,8 +1,10 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.2.0 */
+/** @version: 1.3.0 */
 /**
  * @changelog
+ *
+ * # 1.3.0 - Добавлен get_items_tuple()
  *
  * # 1.2.0 - get_items() теперь асинхронный
  *
@@ -783,6 +785,62 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                             uri: item.get_uri(),
                             uri_display: item.get_uri_display()
                         });
+                    }, 0);
+
+
+                } catch (error) {
+                    reject(error);
+                } finally {
+                    if (interval_source) {
+                        clearInterval(interval_source);
+                    }
+                }
+            }, 0);
+
+        });
+    };
+
+    /** Получает список недавно использованных файлов из системной истории.
+     * И возвращает массив кортежей (uri, uri_display).
+     *
+     * Ориентирован на отправку по D-Bus.
+     *
+     * @see {@link get_items}
+     * */
+    public get_items_tuple(start_index = 0, items_count = Infinity): Promise<[string, string | null][]> {
+        return new Promise((resolve, reject) => {
+            // Проверка включенной истории
+            if (!this.recent_files_enabled) {
+                reject(new HistoryDisabledError('Recent history is now disabled, history file is empty'));
+                return;
+            }
+
+            // Проверка корректности индекса
+            if (start_index < 0 || start_index >= this.default_recent_manager.size) {
+                reject(new TypeError(`Start index out of range: ${start_index} (valid range is 0 to ${this.default_recent_manager.size - 1})`));
+                return;
+            }
+
+            let interval_source: undefined | GLib.Source;
+
+            setTimeout(() => {
+                try {
+                    // Получаем все элементы истории
+                    const items = this.default_recent_manager.get_items().splice(start_index, items_count);
+
+                    const result = [] as [string, string | null][];
+
+                    interval_source = setInterval(() => {
+                        const item = items.shift();
+                        if (!item) {
+                            resolve(result);
+                            if (interval_source) {
+                                clearInterval(interval_source);
+                            }
+                            interval_source = undefined;
+                            return;
+                        }
+                        result.push([item.get_uri(), item.get_uri_display()]);
                     }, 0);
 
 
