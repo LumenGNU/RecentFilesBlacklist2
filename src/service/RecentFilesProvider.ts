@@ -1,25 +1,29 @@
 /** @file: src/service/RecentFilesProvider.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.3.0 */
+/** @version: 1.3.1 */
 /**
  * @changelog
+ *
+ * # 1.3.1 - Стабильная версия
+ *           - Рефакторинг
+ *           - Производительность
  *
  * # 1.3.0 - Добавлен get_items_tuple()
  *
  * # 1.2.0 - get_items() теперь асинхронный
  *
  * # 1.1.1 - Стабильная версия
- *         - Рефакторинг
+ *           - Рефакторинг
  *
  * # 1.1.0 - Сигнал `'history-changed'` переименован
  *           в `'history-changes-settled'`
  *
  * # 1.0.2 - Рефакторинг
- *         - Теперь все свойства будут генерировать DecommissionedError
- *           после decommission().
- *         - ensure_monitoring_inactive теперь отменяет возможный
- *           запланированный сигнал (cancel), а не принудительно
- *           отправляет его (flush).
+ *           - Теперь все свойства будут генерировать DecommissionedError
+ *             после decommission().
+ *           - ensure_monitoring_inactive теперь отменяет возможный
+ *             запланированный сигнал (cancel), а не принудительно
+ *             отправляет его (flush).
  *
  * # 1.0.1 - Документация
  *
@@ -762,38 +766,20 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                 return;
             }
 
-            let interval_source: undefined | GLib.Source;
-
             setTimeout(() => {
                 try {
                     // Получаем все элементы истории
                     const items = this.default_recent_manager.get_items().splice(start_index, items_count);
 
-                    const result = [] as RecentItem[];
-
-                    interval_source = setInterval(() => {
-                        const item = items.shift();
-                        if (!item) {
-                            resolve(result);
-                            if (interval_source) {
-                                clearInterval(interval_source);
-                            }
-                            interval_source = undefined;
-                            return;
-                        }
-                        result.push({
+                    setTimeout(() => {
+                        resolve(items.map(item => ({
                             uri: item.get_uri(),
                             uri_display: item.get_uri_display()
-                        });
+                        })));
                     }, 0);
-
 
                 } catch (error) {
                     reject(error);
-                } finally {
-                    if (interval_source) {
-                        clearInterval(interval_source);
-                    }
                 }
             }, 0);
 
@@ -807,7 +793,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      *
      * @see {@link get_items}
      * */
-    public get_items_tuple(start_index = 0, items_count = Infinity): Promise<[string, string | null][]> {
+    public get_items_tuple(start_index = 0, items_count = Infinity): Promise<[string, string][]> {
         return new Promise((resolve, reject) => {
             // Проверка включенной истории
             if (!this.recent_files_enabled) {
@@ -821,35 +807,17 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                 return;
             }
 
-            let interval_source: undefined | GLib.Source;
-
             setTimeout(() => {
                 try {
                     // Получаем все элементы истории
                     const items = this.default_recent_manager.get_items().splice(start_index, items_count);
 
-                    const result = [] as [string, string | null][];
-
-                    interval_source = setInterval(() => {
-                        const item = items.shift();
-                        if (!item) {
-                            resolve(result);
-                            if (interval_source) {
-                                clearInterval(interval_source);
-                            }
-                            interval_source = undefined;
-                            return;
-                        }
-                        result.push([item.get_uri(), item.get_uri_display()]);
+                    setTimeout(() => {
+                        resolve(items.map(item => ([item.get_uri(), item.get_uri_display() ?? ''])));
                     }, 0);
-
 
                 } catch (error) {
                     reject(error);
-                } finally {
-                    if (interval_source) {
-                        clearInterval(interval_source);
-                    }
                 }
             }, 0);
 
@@ -934,9 +902,11 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
                     this.ensure_monitoring_inactive();
                 }
                 break;
-            default:
+            default: {
                 const _state: never = state;
                 console.assert(false, `Unknown state: ${_state}`);
+                break;
+            }
         }
 
         this.state_context.previous_state = this.state;
