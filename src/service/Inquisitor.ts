@@ -1,8 +1,10 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.3.1 */
+/** @version: 1.3.2 */
 /**
  * @changelog
+ *
+ * # 1.3.2 - Исправлен тип `get criteria()`
  *
  * # 1.3.1 - Стабильная версия
  *         - Рефакторинг
@@ -593,7 +595,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
     @GObjectDecorator.JSObjectProperty({
         flags: GObject.ParamFlags.READABLE
     })
-    public get criteria(): CompiledCriteriaSpec<CriteriaType>[] | undefined {
+    public get criteria(): CompiledCriteriaSpec<CriteriaType>[] {
 
         // проверяем, не выведен ли объект из эксплуатации
         if (this.eligibility_criteria === undefined) {
@@ -637,7 +639,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *
      *         _Конкретная причина доступна через `error.cause`_
      *
-     * @throws // @todo перечислить остальные ошибки
+     * @throws {SetCriteriaCancelledError} При отмене текущей установки критериев следующим вызовом `set_criteria()`.
      *
      * @throws {ObjectDecommissionedError} Если объект выведен из эксплуатации
      *
