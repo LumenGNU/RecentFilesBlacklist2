@@ -1,8 +1,17 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.3.2 */
+/** @version: 2.0.1 */
 /**
  * @changelog
+ *
+ * # 2.0.1 - Рефакторинг
+ *
+ * # 2.0.0 - Изменен интерфейс для работы с Inquisitor
+ *           - inspect_to_report
+ *           - inspect_to_signal
+ *           - do_process - теперь приватный метод
+ *         - Изменилось поведение
+ *         - Исправлена документация
  *
  * # 1.3.2 - Исправлен тип `get criteria()`
  *
@@ -37,9 +46,9 @@ import {
     GObjectDecorator
 } from '../shared/gobject-decorators.js';
 import type {
-    RecentItem,
     SourceID,
-    PromiseControllers
+    PromiseControllers,
+    RecentItemTuple,
 } from '../shared/common-types.js';
 import {
     NO_SOURCE,
@@ -105,11 +114,10 @@ type CompiledCriteriaSpec<CriteriaType extends keyof CompiledCriteriaMap> = {
     type: CriteriaType,
 } & CompiledCriteriaMap[CriteriaType];
 
-
 /** Информация о совпавшем критерии.
  *
- * Передаётся в сигнале `'matched-result'` для каждого
- * критерия, которому соответствует проверяемый файл. */
+ * Используется в отчетах и сигналах для описания
+ * почему файл был помечен для удаления. */
 export interface SinsInfo {
     /** Тип сработавшего критерия.
      * Может быть как пользовательский тип (из CriteriaType),
@@ -120,23 +128,32 @@ export interface SinsInfo {
     label: string,
 }
 
-/** Режимы проверки файлов.
- *
- * Определяет баланс между скоростью обработки и нагрузкой на систему. */
-export enum Thoroughness {
-    /** Тщательный режим.
-     * - Проверяет все критерии для каждого файла
-     * - Собирает полный список всех совпадений
-     * - Обрабатывает файлы максимально быстро
-     * - Высокая нагрузка на систему */
-    thorough = 0,
+/** Режимы проверки */
+export enum ProcessMode {
     /** Ленивый режим.
      * - Останавливается на первом совпадении
      * - Делает паузы между проверками файлов
      * - Низкая скорость обработки
      * - Минимальная нагрузка на систему */
-    lazy = 1,
+    LAZY,
+    /** Тщательный режим.
+     * - Проверяет все критерии для каждого файла
+     * - Собирает полный список всех совпадений
+     * - Обрабатывает файлы максимально быстро
+     * - Высокая нагрузка на систему */
+    REPORT
 }
+
+export interface ProcessOperation<T = unknown> {
+    source: SourceID;
+    current_index: number;
+    batch_size: number;
+    controller: PromiseControllers<T>;
+    report?: Report;
+}
+
+type URI = string;
+export type Report = Map<URI, { uri_display: string; sins: SinsInfo[]; }>;
 
 /** Ошибка прерывания процесса проверки.
  *
@@ -261,13 +278,15 @@ export class SetCriteriaCancelledError extends Error {
     }
 }
 
-/** Inquisitor - Проверяет URI файлов на соответствие заданным критериям фильтрации.
+
+
+/** Inquisitor - Проверяет список на соответствие заданным критериям фильтрации.
  *
  * ## Назначение
  *
  * Класс реализует асинхронный механизм проверки списка данных на соответствие
  * заданным критериям. Работает как детектор, выявляя совпадения и уведомляя
- * о них через сигналы, не выполняя никаких действий над самими данными.
+ * о них, не выполняя никаких действий над самими данными.
  *
  * ## Основные возможности
  *
@@ -275,10 +294,10 @@ export class SetCriteriaCancelledError extends Error {
  * - Поддержка различных типов критериев
  *   Реализовано:
  *   - glob (Gtk.PatternSpec)
- * - Два режима работы с разным балансом производительности
+ * - Два режима работы с разным балансом производительности и типом уведомления
  * - Кэширование "чистых" файлов для оптимизации
  * - Прерывание процесса проверки в любой момент
- * - Детальная информация о совпадениях через сигналы
+ * - Детальная информация о совпавших критериях
  *
  * ## Архитектура и интеграция
  *
@@ -288,22 +307,24 @@ export class SetCriteriaCancelledError extends Error {
  *  - Не принимает параметров
  *
  * #### Сигналы:
- * - `'matched-result'` Генерируется после проверки каждого файла, если были совпадения.
+ * - `'matched-result'` Генерируется в режиме LAZY после проверки каждого файла, если были совпадения.
  *   Параметры
  *   - `URI: string` URI файла
- *   - `mode: Thoroughness` режим проверки
- *   - `sins: SinsInfo[]` массив совпавших критериев
+ *   - `sin: SinsInfo` первый совпавший критерий
  *
  * #### Константы:
  * - `MAX_CACHE_SIZE` Максимальный размер кэша для хранения URI "чистых" файлов.
+ * - `BATCH_SIZE` Размер пакета для обработки (в режиме REPORT).
+ * - `PROCESS_INTERVAL` Интервал между обработкой (в режиме LAZY).
  *
  * #### Свойства:
- * - `criteria: CompiledCriteriaSpec<CriteriaType>[] | undefined` Возвращает текущие скомпилированные критерии фильтрации. Только чтение.
+ * - `criteria: CompiledCriteriaSpec<CriteriaType>[]` Возвращает текущие скомпилированные критерии фильтрации. Только чтение.
  *
  * #### Методы:
  * - `set_criteria(criteria: CriteriaSpec<CriteriaType>[]): Promise<void>` Устанавливает новые критерии фильтрации.
  * - `process_abort(msg): boolean` Немедленно прерывает текущий процесс проверки.
- * - `do_process(items_info: RecentItem[], thoroughness: Thoroughness = Thoroughness.lazy): Promise<void>` Запускает проверку списка.
+ * - `inspect_to_report(items_info: RecentItemTuple[]): Promise<Report>` Проверяет список на соответствие заданным критериям в режиме REPORT.
+ * - `inspect_to_signals(items_info: RecentItemTuple[]): Promise<void>` Проверяет список на соответствие заданным критериям в режиме LAZY.
  * - `decommission(): void` Выводит объект из эксплуатации.
  *
  * #### Ошибки:
@@ -313,7 +334,7 @@ export class SetCriteriaCancelledError extends Error {
  *
  * Класс спроектирован как компонент сервиса. Он не управляет
  * списками или критериями самостоятельно, а получает их извне.
- * Результаты проверки передаются через сигнал `'matched-result'`, позволяя
+ * Результаты проверки "отдаются как есть", позволяя
  * внешнему коду реагировать на совпадения любым необходимым способом.
  *
  * ## Типичный сценарий использования
@@ -323,8 +344,8 @@ export class SetCriteriaCancelledError extends Error {
  * const inquisitor = new Inquisitor();
  *
  * // 2. Подписка на результаты
- * inquisitor.connect('matched-result', (obj, uri, mode, sins) => {
- *     console.log(`Файл ${uri} соответствует критериям:`, sins);
+ * inquisitor.connect('matched-result', (obj, uri, sin) => {
+ *     console.log(`Файл ${uri} соответствует критериям:`, sin);
  * });
  *
  * // 3. Установка критериев
@@ -334,21 +355,23 @@ export class SetCriteriaCancelledError extends Error {
  * ]);
  *
  * // 4. Запуск проверки
- * await inquisitor.do_process(filesList, Thoroughness.thorough);
+ * await inquisitor.inspect_to_signals(filesList);
  * ```
  *
  * ## Режимы проверки
  *
- * ### Thoroughness.thorough (Тщательный)
- * - Проверяет файл по всем критериям
+ * ### `inspect_to_report()` (Для UI. Для сбора полного отчета по всем критериям)
+ * - Проверяет записи по всем критериям
+ * - Выполняет проверку пакетами по `BATCH_SIZE` в каждом интервале
  * - Собирает полную информацию обо всех совпадениях
  * - Обрабатывает список максимально быстро без пауз
- * - Подходит для быстрого анализа при изменении списка файлов
- *   для отображения результатов в UI
+ * - Возвращает отчет как результат
+ * - Подходит для быстрого анализа, для отображения результатов в UI
  *
- * ### Thoroughness.lazy (Ленивый)
- * - Останавливает проверку файла после первого совпадения
+ * ### `inspect_to_signals()` (Для фоновой работы. Для генерации сигналов)
+ * - Останавливает проверку записи после первого совпадения
  * - Вставляет паузы между проверками (`PROCESS_INTERVAL` мс)
+ * - Для каждого совпадения с критерием генерирует сигнал `matched-result`
  * - Минимизирует нагрузку на систему
  * - Подходит для фоновой обработки без нагрузки на систему
  *
@@ -360,12 +383,12 @@ export class SetCriteriaCancelledError extends Error {
  * - Использует `Set` для быстрой проверки наличия
  * - Максимальный размер ограничен `MAX_CACHE_SIZE`
  * - При превышении лимита удаляется самая старая запись (FIFO)
- * - Кэш сбрасывается при изменении критериев `set_criteria()`
+ * - Кэш сбрасывается при изменении критериев (@see {@link set_criteria})
  * - Файлы из кэша пропускаются при последующих проверках
  *   если критерии не менялись
  *
  * Это особенно /и только/ эффективно при частых проверках одного и того же
- * списка данных с небольшими изменениями если критерии не меняются.
+ * списка данных с небольшими изменениями если критерии не меняются (режим LAZY).
  *
  * Эта стратегия хорошо работает со списком истории, поскольку системный
  * менеджер всегда отдает полный список файлов в истории, а изменения в нем,
@@ -376,11 +399,11 @@ export class SetCriteriaCancelledError extends Error {
  * ### Поддерживаемые типы критериев
  *
  * #### glob
- * Сопоставление имён файлов с шаблоном в стиле shell glob (упрощённый):
+ * Сопоставление путей файлов с шаблоном в стиле shell glob (упрощённый):
  * - `*` - любое количество любых символов
  * - `?` - один любой символ
  *
- * Для дополнительной информации смотри `GLib.PatternSpec`.
+ * @see {@link GLib.PatternSpec Для дополнительной информации смотри `GLib.PatternSpec`}.
  *
  * Примеры:
  * - `*.tmp` - все файлы с расширением .tmp
@@ -400,6 +423,8 @@ export class SetCriteriaCancelledError extends Error {
  * }
  * ```
  *
+ * При этом `uri_display` возвращается в отчете как строка `'<unknown>'` или  `'<empty>'`.
+ *
  * Это помогает выявлять некорректные записи в списке недавних файлов,
  * которые невозможно проверить на совпадение критериям.
  *
@@ -416,7 +441,7 @@ export class SetCriteriaCancelledError extends Error {
  * - Использует скомпилированные `GLib.PatternSpec` для быстрого сопоставления
  * - Кэширует результаты для избежания повторных проверок
  * - В ленивом режиме распределяет нагрузку по времени
- * - Поддерживает прерывание длительных операций
+ * - Поддерживает возможность прерывание длительных операций
  * */
 @GObjectDecorator.Class({
     Signals: {
@@ -425,9 +450,7 @@ export class SetCriteriaCancelledError extends Error {
             param_types: [
                 /** matched-result::uri:string URI файла */
                 GObject.TYPE_STRING,
-                /** matched-result::mode:Thoroughness режим проверки */
-                GObject.TYPE_UINT,
-                /** matched-result::sins:SinsInfo[] массив совпавших критериев */
+                /** matched-result::sin:SinsInfo первый совпавший критерий */
                 GObject.TYPE_JSOBJECT,
             ],
         },
@@ -437,9 +460,9 @@ export class SetCriteriaCancelledError extends Error {
 })
 export class Inquisitor extends GObject.Object implements Decommissionable {
 
-    /** Максимальный размер кэша для хранения URI "чистых" файлов.
+    /** Максимальный размер кэша для хранения "чистых" URI.
      *
-     * Определяет предельное количество записей в кэше файлов, которые
+     * Определяет предельное количество записей в кэше, которые
      * не соответствуют ни одному критерию. При достижении этого лимита
      * самая старая запись вытесняется по принципу FIFO.
      *
@@ -457,40 +480,22 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * @see {@link add_to_trustworthy_list} Метод управления кэшем */
     static MAX_CACHE_SIZE = 1000 as const;
 
+    /** Количество записей, обрабатываемых за один проход в режиме REPORT.
+     * @see {@link do_process}  */
+    static BATCH_SIZE = 25 as const;
+
     /** Интервал между проверками файлов в миллисекундах.
      *
-     * Определяет задержку между обработкой отдельных файлов в процессе
-     * проверки. Фактическая задержка зависит от выбранного режима:
-     *
-     * - **Thoroughness.thorough** (0): задержка = 0 * PROCESS_INTERVAL = 0 мс (всегда без пауз)
-     * - **Thoroughness.lazy** (1): задержка = 1 * PROCESS_INTERVAL = PROCESS_INTERVAL мс
-     *
-     * Малое значение (2 мс) обеспечивает плавную работу в ленивом режиме,
-     * позволяя системе обрабатывать другие задачи между проверками файлов,
-     * при этом не создавая заметных задержек для пользователя.
+     * Определяет задержку между обработкой отдельных записей в режиме LAZY.
      *
      * ## Рекомендации по изменению:
      *
-     * - **1-5 мс**: оптимально для большинства случаев
-     * - **10-50 мс**: для очень больших списков или слабых систем
-     * - **0 мс**: только для режима thorough (быстрая обработка)
+     * - 1-5 мс: оптимально для большинства случаев
+     * - 10-50 мс: для очень больших списков или слабых систем
+     * - 0 мс: только для режима REPORT (быстрая обработка)
      *
-     * @example
-     * ```typescript
-     * // Расчёт времени обработки 1000 файлов
-     * const filesCount = 1000;
-     * const lazyTime = filesCount * Inquisitor.PROCESS_INTERVAL; // 2000 мс
-     * const thoroughTime = 0; // Без задержек
-     *
-     * console.log(`Ленивый режим: ~${lazyTime}мс минимум`);
-     * console.log(`Быстрый режим: максимально быстро`);
-     * ```
-     *
-     * @see {@link Thoroughness} Режимы работы
      * @see {@link do_process} Использование в процессе проверки */
-    static PROCESS_INTERVAL = 2 as const;
-
-
+    static PROCESS_INTERVAL = 7 as const;
 
     /** Скомпилированный набор критериев фильтрации.
      *
@@ -499,13 +504,13 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * и используются во всех последующих проверках до следующего изменения.
      *
      * - Пустой массив означает отсутствие критериев
-     * - `undefined` будет означать, что объект выведен из эксплуатации (@see {@link decommission} `decommission()`)
+     * - `undefined` будет означать, что объект выведен из эксплуатации (@see {@link decommission `decommission()`})
      *
      * @see {@link set_criteria} Установка критериев
      * @see {@link criteria} Публичный геттер */
     private eligibility_criteria = [] as CompiledCriteriaSpec<CriteriaType>[];
 
-    /** Кэш URI файлов, не соответствующих критериям.
+    /** Кэш URI, не соответствующих критериям.
      *
      * Для оптимизации повторных проверок.
      *
@@ -515,14 +520,14 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * - Использует FIFO для вытеснения старых записей
      *
      * @see {@link add_to_trustworthy_list} Добавление в кэш */
-    private trustworthy_list = new Set<string>();
+    private trustworthy_list = new Set<URI>();
 
     /** Состояние текущего процесса проверки.
      *
      * Хранит прогресс обработки списка и
      * контроллер "текущего" Promise для возможности прерывания.
      * */
-    private process_operation = {
+    private process_operation: ProcessOperation = {
         /** Источник таймера для интервальной обработки файлов.
          *
          * Хранит ссылку на активный интервал, созданный через `setInterval()`.
@@ -531,28 +536,28 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
          * - `null` - нет активной проверки
          * - `GLib.Source` - идёт процесс проверки
          * */
-        source: NO_SOURCE as SourceID,
+        source: NO_SOURCE,
         /** Текущий индекс для проверки */
-        current_index: 0 as number,
+        current_index: 0,
+        batch_size: 1,
         /** Контроллер Promise текущей операции */
-        controller: {
-            reject: undefined,
-            resolve: undefined
-        } as PromiseControllers<void>,
+        controller: {},
+        report: undefined,
     };
 
 
+    /** Состояние текущего процесса установки критериев. */
     private criteria_operation = {
-        /** Источник таймера для интервальной обработки критериев.
+        /** Источник таймера для интервальной установки критериев.
          *
          * Хранит ссылку на активный интервал, созданный через `setInterval()`.
-         * Используется для контроля процесса проверки и его прерывания.
+         * Используется для контроля процесса и его прерывания.
          *
-         * - `null` - нет активной проверки
-         * - `GLib.Source` - идёт процесс проверки
+         * - `null` - нет
+         * - `GLib.Source` - идёт процесс
          * */
         source: NO_SOURCE as SourceID,
-        /** Текущий индекс для проверки */
+        /** Текущий индекс */
         current_index: 0 as number,
         /** Контроллер Promise текущей операции */
         controller: {
@@ -607,7 +612,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
     /** Устанавливает новые критерии фильтрации.
      *
-     * Реализации конкурентно-безопасного API в условиях среды GJS.
+     * Реализация конкурентно-безопасного API в условиях среды GJS.
      *
      * Старается гарантировать атомарность:
      * - только актуальная операция  может записать в `this.eligibility_criteria`.
@@ -618,7 +623,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * Будет выполнено:
      * 1. Прерывает текущую проверку (`do_process()`, если выполняется)
      * 2. Сбрасывает старые критерии
-     * 3. Очищает кэш проверенных ("чистых") файлов
+     * 3. Очищает кэш проверенных ("чистых")
      * 4. Валидирует и компилирует новые критерии
      * 5. Устанавливает новые критерии (если валидация успешна)
      *
@@ -628,7 +633,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * @param criteria Массив критериев для установки
      *
      * @returns {Promise<void>} Promise, который разрешается после успешной
-     *          установки критериев
+     *                          установки критериев
      *
      * @throws {CriteriaValidateError} При ошибках валидации критериев:
      *         - Если criteria не является массивом
@@ -787,7 +792,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * При прерывании активной проверки, Promise от `do_process()` будет отклонён
      * с ошибкой `ProcessAbortError`.
      *
-     * @param [msg='aborted'] Сообщение для `ProcessAbortError`
+     * @param [msg='aborted'] Сообщение для `ProcessAbortError`. По умолчанию `Process aborted`
      *
      * @returns true, если процесс был прерван;
      *          false, если активного процесса не было
@@ -828,144 +833,225 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
     /** Запускает асинхронную проверку переданного списка.
      *
-     * Проверяет каждый файл из списка на соответствие установленным критериям.
-     * Для файлов с совпадениями генерирует сигнал `'matched-result'`.
+     * Проверяет каждую запись из списка на соответствие установленным критериям.
      *
-     * Файлы без совпадений добавляются в кэш для оптимизации повторных проверок.
+     * Работает в двух режимах: LAZY и REPORT
+     *
+     * В режиме LAZY (для фоновой работы)
+     * - Проверяет записи по одной
+     * - Останавливается на первом совпадении
+     * - Делает паузу перед проверкой следующей записи (@see {@link Inquisitor.PROCESS_INTERVAL})
+     * - Генерирует сигнал `'matched-result'` после совпадения
+     * - Не возвращает результат
+     *
+     * В режиме REPORT (для интерактивной работы)
+     * - Проверяет записи пакетно (@see {@link Inquisitor.BATCH_SIZE})
+     * - Проверяет на соответствие всем критериям
+     * - Работает без пауз (минимальная пауза `setInterval`)
+     * - Не генерирует сигнал `'matched-result'`
+     * - Возвращает результат как карту с отчетом о совпадениях
+     *
+     * URI без совпадений добавляются в кэш для оптимизации повторных проверок.
      *
      * Если в момент вызова уже выполняется другая проверка, она будет прервана
      * с ошибкой `ProcessAbortError('New process will be initiated')`.
      *
-     * @param items_info Список файлов для проверки
-     * @param [thoroughness=Thoroughness.lazy] Режим проверки:
-     *        - Thoroughness.lazy: медленная проверка с паузами, минимальная нагрузка
-     *        - Thoroughness.thorough: быстрая проверка без пауз, высокая нагрузка
+     * @param items_info Список для проверки (кортеж кортежей `[uri, uri_display]`)
+     * @param mode Режим проверки
      *
-     * @returns {Promise<void>} Promise, который разрешается после проверки всех файлов
+     * @returns Promise, который разрешается после проверки всех записей:
+     *                    - `Promise<void>` в режиме LAZY
+     *                    - `Promise<Report>` в режиме REPORT
      *
      * @throws {ProcessAbortError} Если проверка была прервана вызовом `process_abort()`
+     *                             Происходит в том числе и при повторном вызове `do_process()`
      *
-     * @fires 'matched-result' Для каждого файла с совпадениями.
+     * @fires 'matched-result' Для каждого файла с совпадениями в режиме LAZY.
+     *        Передается информация о первом найденном совпадении.
      *        Параметры:
-     *        - `uri`: `string`,
-     *        - `mode`: `Thoroughness`,
-     *        - `sins`: `SinsInfo[]`
+     *        - `uri`: `string`
+     *        - `sin`: `SinsInfo`
      *
      * @example
      * ```typescript
-     * // Подготовка данных
-     * const files = [
-     *     { uri: 'file:///tmp/test.tmp', uri_display: '/tmp/test.tmp' },
-     *     { uri: 'file:///home/user/doc.txt', uri_display: '/home/user/doc.txt' }
-     * ];
      *
-     * // Быстрая проверка с полным анализом
-     * try {
-     *     await inquisitor.do_process(files, Thoroughness.thorough);
-     *     console.log('Проверка завершена');
-     * } catch (error) {
-     *     ...
-     * }
      * ``` */
-    public do_process(
-        items_info: RecentItem[],
-        thoroughness: Thoroughness = Thoroughness.lazy
-    ): Promise<void> {
+    private do_process<T = unknown>(
+        items_info: RecentItemTuple[],
+        mode: ProcessMode
+    ): Promise<T> {
         // Прерываем текущую обработку, если она запущена
         this.process_abort('New process will be initiated');
 
         this.process_operation.current_index = 0;
 
+        // Определяем размер пакета в зависимости от режима
+        this.process_operation.batch_size = (mode === ProcessMode.REPORT) ? Inquisitor.BATCH_SIZE : 1;
+
+        if (mode === ProcessMode.REPORT) {
+            this.process_operation.report = new Map();
+        } else {
+            this.process_operation.report = undefined;
+        }
+
         // Возвращаем Promise
-        return new Promise<void>((resolve, reject) => {
+        return new Promise<T>((resolve, reject) => {
 
             // Сохраняем контроллеры
             this.process_operation.controller.reject = reject;
-            this.process_operation.controller.resolve = resolve;
+            (this.process_operation.controller as PromiseControllers<T>).resolve = resolve;
 
             // Запускаем интервал для обработки
             // --------------------------------
-            this.process_operation.source = setInterval(() => {
-                // @todo Стоит весь колбек поместить в трай блок?
-                // Проверяем завершение ...
-                if (this.process_operation.current_index >= items_info.length) {
-
-                    clearInterval(this.process_operation.source!);
-                    this.process_operation.source = null;
-                    this.process_operation.controller.resolve!();
-                    return;
-                }
-
-                const current_file = items_info[this.process_operation.current_index];
-                const sins = [] as SinsInfo[];
-
-                // Проверяем, не находится ли файл уже в кэше чистых,
-                // если да - пропускаем. Если нет - проверяем ...
-                if (!this.trustworthy_list.has(current_file.uri)) {
-
-                    if (current_file.uri_display && current_file.uri_display.length > 0) {
-                        // Проверяем файл по критериям
-                        for (const criterion of this.eligibility_criteria!) {
-
-                            switch (criterion.type) {
-                                case 'glob': {
-                                    if ((criterion as CompiledCriteriaSpec<'glob'>).pattern_spec.match_string(current_file.uri_display)) {
-                                        sins.push({
-                                            type: criterion.type,
-                                            label: (criterion as CompiledCriteriaSpec<'glob'>).label
-                                        });
-                                    }
-                                    break;
-                                }
-                                default: {
-                                    const _type: never = criterion.type;
-                                    console.assert(false, `Неизвестный CriteriaType тип: ${_type}`);
-                                    break;
-                                }
-                            }
-
-                            // Для быстрого режима прерываем после первого совпадения
-                            if (sins.length > 0 && thoroughness === Thoroughness.lazy) {
-                                break;
-                            }
-                        }
-
-                    } else {
-                        // безоговорочно сообщаем о файлах без отображаемого пути
-                        sins.push({
-                            type: 'lint',
-                            label: 'MISSING-DISPLAY-URI'
-                        });
-                    }
-
-                    if (sins.length > 0) {
-                        // Если есть совпадения, генерируем сигнал 'matched-result' ...
-                        this.emit('matched-result', current_file.uri, thoroughness, sins);
-                    } else {
-                        // Если совпадений не было - добавляем в кэш чистых файлов ...
-                        this.add_to_trustworthy_list(current_file.uri);
-                    }
-                }
-
-                // Переходим к следующему файлу ...
-                this.process_operation.current_index++;
-
-            }, /* пауза, в зависимости от режима */ thoroughness * Inquisitor.PROCESS_INTERVAL);
+            this.process_operation.source = setInterval(
+                this.process_interval_cb.bind(this),
+                (mode === ProcessMode.REPORT) ? 0 : Inquisitor.PROCESS_INTERVAL,  // пауза, в зависимости от режима
+                items_info,
+                mode
+            );
         });
     }
 
-    /** Добавляет URI в кэш "чистых" файлов (не соответствующих текущим критериям).
+    /** Колбек setInterval`а процесса проверки на соответствие критериям */
+    private process_interval_cb(items_infos: RecentItemTuple[], mode: ProcessMode) {
+
+        try {
+
+            // Проверяем завершение ...
+            if (this.process_operation.current_index >= items_infos.length) {
+
+                clearInterval(this.process_operation.source!);
+                this.process_operation.source = null;
+                if (mode === ProcessMode.REPORT) {
+                    (this.process_operation.controller as PromiseControllers<Report>).resolve!(this.process_operation.report!);
+                } else {
+                    (this.process_operation.controller as PromiseControllers<void>).resolve!();
+                }
+                return;
+            }
+
+            // Определяем количество элементов для обработки (пакета) в этом цикле
+            const end_index = Math.min(
+                this.process_operation.current_index + this.process_operation.batch_size,
+                items_infos.length
+            );
+
+            // Обрабатываем пакет элементов
+            for (let i = this.process_operation.current_index; i < end_index; i++) {
+
+                const current_item_info = items_infos[i]; // [0] - URI, [1] - URI display
+
+
+                // Проверяем, не находится ли файл уже в кэше чистых,
+                // если да - пропускаем. Если нет - проверяем ...
+                if (!this.trustworthy_list.has(current_item_info[0])) {
+
+                    // Проверяем на совпадение критериев
+                    const sins = this.check_criteria(current_item_info[1], mode);
+
+                    if (sins.length > 0) {
+                        if (mode === ProcessMode.REPORT) {
+                            // Если есть совпадения, добавляем в отчет
+                            this.process_operation.report!.set(current_item_info[0], {
+                                uri_display: (current_item_info[1] === null) ? '<unknown>' : (current_item_info[1].length > 0) ? current_item_info[1] : '<empty>',
+                                sins: sins
+                            });
+                        } else {
+                            // Если есть совпадения (всегда одно в режиме LAZY), генерируем сигнал 'matched-result' ...
+                            this.emit('matched-result', current_item_info[0], sins[0]);
+                        }
+                    } else {
+                        // Если совпадений не было - добавляем в кэш чистых файлов ...
+                        this.add_to_trustworthy_list(current_item_info[0]);
+                    }
+
+                }
+            }
+
+            // Обновляем индекс на размер обработанного пакета
+            this.process_operation.current_index = end_index;
+
+        } catch (error) {
+            clearInterval(this.process_operation.source!);
+            this.process_operation.source = null;
+            this.process_operation.controller.reject?.(
+                new Error('Processing failed! Unknown error', { cause: error })
+            );
+        }
+    };
+
+    private check_criteria(uri_display: string | null, mode: ProcessMode): SinsInfo[] {
+
+        const sins = [] as SinsInfo[];
+
+        if (uri_display !== null && uri_display.length > 0) {
+            // Проверяем файл по критериям
+            for (const criterion of this.eligibility_criteria!) {
+
+                switch (criterion.type) {
+                    // GLOB
+                    case 'glob': {
+                        if ((criterion as CompiledCriteriaSpec<'glob'>).pattern_spec.match_string(uri_display)) {
+                            sins.push({
+                                type: criterion.type,
+                                label: (criterion as CompiledCriteriaSpec<'glob'>).label
+                            });
+                        }
+                        break;
+                    }
+                    default: {
+                        const _type: never = criterion.type;
+                        console.assert(false, `Unknown CriteriaType: ${_type}`);
+                        break;
+                    }
+                }
+
+                // Для быстрого режима прерываем после первого совпадения
+                if (sins.length > 0 && mode === ProcessMode.LAZY) {
+                    break;
+                }
+            }
+
+        } else {
+            // безоговорочно сообщаем о файлах без отображаемого пути
+            sins.push({
+                type: 'lint',
+                label: 'MISSING-DISPLAY-URI'
+            });
+        }
+
+        return sins;
+
+    }
+
+    /** Запускает обработку, генерируя отчет (без сигналов).
+     *
+     * @see {@link do_process} */
+    public inspect_to_report(items_info: RecentItemTuple[]): Promise<Report> {
+        return this.do_process<Report>(items_info, ProcessMode.REPORT);
+    }
+
+    /** Запускает "фоновую" проверку, генерируя сигналы `matched-result` (без отчета).
+     *
+     * @fires 'matched-result'
+     *
+     * @see {@link do_process} */
+    public inspect_to_signals(items_info: RecentItemTuple[]): Promise<void> {
+        return this.do_process<void>(items_info, ProcessMode.LAZY);
+    }
+
+    /** Добавляет в кэш "чистых" URI (не попадающих под текущие критерии).
      *
      * Реализует FIFO-стратегию вытеснения: при достижении максимального
      * размера кэша (`MAX_CACHE_SIZE`) удаляется самая старая запись.
      *
-     * @param uri URI файла для добавления в кэш
+     * @param uri URI для добавления в кэш
      *
      * @private
      * @example
      * ```typescript
      * // Внутреннее использование
-     * if (sins.length === 0) {
+     * if (sin.length === 0) {
      *     this.add_to_trustworthy_list(current_file.uri);
      * }
      * ```*/
@@ -1033,6 +1119,9 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         this.do_process = (throw_decommissioned as typeof this.do_process);
         this.process_abort = (throw_decommissioned as typeof this.process_abort);
         this.set_criteria = (throw_decommissioned as typeof this.set_criteria);
+
+        // шобы Клодик не ругался
+        this.trustworthy_list.clear();
 
         this.eligibility_criteria = (undefined as unknown as typeof this.eligibility_criteria);
         this.trustworthy_list = (undefined as unknown as typeof this.trustworthy_list);
