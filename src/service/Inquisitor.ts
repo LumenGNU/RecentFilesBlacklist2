@@ -1,8 +1,14 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 2.0.1 */
+/** @version: 2.2.2 */
 /**
  * @changelog
+ *
+ * # 2.2.2 - Стабильная версия
+ *         - Рефакторинг
+ *
+ * # 2.2.1 - Теперь список обрабатывается через splice.
+ *           - Список будет "съеден" во время обработки.
  *
  * # 2.0.1 - Рефакторинг
  *
@@ -85,8 +91,6 @@ interface CriteriaMap {
 interface CompiledCriteriaMap {
     /** Скомпилированный критерий glob */
     glob: {
-        /** Метка критерия для идентификации в результатах */
-        label: string,
         /** Скомпилированный glob-шаблон для быстрого сопоставления */
         pattern_spec: GLib.PatternSpec,
     },
@@ -112,13 +116,15 @@ export type CriteriaSpec<CriteriaType extends keyof CriteriaMap> = {
 type CompiledCriteriaSpec<CriteriaType extends keyof CompiledCriteriaMap> = {
     /** Тип критерия фильтрации */
     type: CriteriaType,
+    /** Метка критерия для идентификации в результатах */
+    label: string,
 } & CompiledCriteriaMap[CriteriaType];
 
 /** Информация о совпавшем критерии.
  *
  * Используется в отчетах и сигналах для описания
  * почему файл был помечен для удаления. */
-export interface SinsInfo {
+export interface SinInfo {
     /** Тип сработавшего критерия.
      * Может быть как пользовательский тип (из CriteriaType),
      * так и внутренний тип 'lint' для файлов с проблемами */
@@ -146,14 +152,12 @@ export enum ProcessMode {
 
 export interface ProcessOperation<T = unknown> {
     source: SourceID;
-    current_index: number;
-    batch_size: number;
     controller: PromiseControllers<T>;
     report?: Report;
 }
 
 type URI = string;
-export type Report = Map<URI, { uri_display: string; sins: SinsInfo[]; }>;
+export type Report = Map<URI, { uri_display: string; sins: SinInfo[]; }>;
 
 /** Ошибка прерывания процесса проверки.
  *
@@ -495,7 +499,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * - 0 мс: только для режима REPORT (быстрая обработка)
      *
      * @see {@link do_process} Использование в процессе проверки */
-    static PROCESS_INTERVAL = 7 as const;
+    static PROCESS_INTERVAL = 8 as const;
 
     /** Скомпилированный набор критериев фильтрации.
      *
@@ -524,8 +528,8 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
     /** Состояние текущего процесса проверки.
      *
-     * Хранит прогресс обработки списка и
-     * контроллер "текущего" Promise для возможности прерывания.
+     * Хранит контроллер Promise для возможности прерывания
+     * и дополнительные данные процесса.
      * */
     private process_operation: ProcessOperation = {
         /** Источник таймера для интервальной обработки файлов.
@@ -537,9 +541,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
          * - `GLib.Source` - идёт процесс проверки
          * */
         source: NO_SOURCE,
-        /** Текущий индекс для проверки */
-        current_index: 0,
-        batch_size: 1,
         /** Контроллер Promise текущей операции */
         controller: {},
         report: undefined,
@@ -856,7 +857,14 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * Если в момент вызова уже выполняется другая проверка, она будет прервана
      * с ошибкой `ProcessAbortError('New process will be initiated')`.
      *
-     * @param items_info Список для проверки (кортеж кортежей `[uri, uri_display]`)
+     * @param items_infos Список для проверки (кортеж кортежей `[uri, uri_display]`)
+     *                    ВНИМАНИЕ: Архитектура предполагает, что Inquisitor единственный/крайний
+     *                    потребитель этого списка. И, в угоду производительности, он
+     *                    будет очищать его по мере обработки.
+     *                    Поэтому, если этот список разделяемый ресурс - передавай
+     *                    сюда копию:
+     *                    `await inquisitor.inspect_to_report([...test_list_500]);`
+     *                    Внимательно в тестах!
      * @param mode Режим проверки
      *
      * @returns Promise, который разрешается после проверки всех записей:
@@ -875,18 +883,16 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * @example
      * ```typescript
      *
+     * @affects items_infos Будет очищен после обработки. Процесс "съедает" переданный
+     *                      список по мере обработки через splice(), освобождая память.
+     *
      * ``` */
     private do_process<T = unknown>(
-        items_info: RecentItemTuple[],
+        items_infos: RecentItemTuple[],
         mode: ProcessMode
     ): Promise<T> {
         // Прерываем текущую обработку, если она запущена
         this.process_abort('New process will be initiated');
-
-        this.process_operation.current_index = 0;
-
-        // Определяем размер пакета в зависимости от режима
-        this.process_operation.batch_size = (mode === ProcessMode.REPORT) ? Inquisitor.BATCH_SIZE : 1;
 
         if (mode === ProcessMode.REPORT) {
             this.process_operation.report = new Map();
@@ -906,7 +912,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             this.process_operation.source = setInterval(
                 this.process_interval_cb.bind(this),
                 (mode === ProcessMode.REPORT) ? 0 : Inquisitor.PROCESS_INTERVAL,  // пауза, в зависимости от режима
-                items_info,
+                items_infos,
                 mode
             );
         });
@@ -917,8 +923,43 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
         try {
 
-            // Проверяем завершение ...
-            if (this.process_operation.current_index >= items_infos.length) {
+            // Обрабатываем пакет элементов
+            // Определяем количество элементов для обработки (пакета) в этом цикле
+            // "Съедаем" список по мере обработки
+            const items_batch = items_infos.splice(0, (mode === ProcessMode.REPORT) ? Inquisitor.BATCH_SIZE : 1);
+            for (const item_tuple of items_batch) {
+
+                // item_tuple[0] - uri
+                // item_tuple[1] - uri_display
+
+                // Проверяем, не находится ли файл уже в кэше чистых,
+                // если да - пропускаем. Если нет - проверяем ...
+                if (!this.trustworthy_list.has(item_tuple[0])) {
+
+                    // Проверяем на совпадение критериев
+                    const sins = this.check_criteria(item_tuple[1], mode);
+
+                    if (sins.length > 0) {
+                        if (mode === ProcessMode.REPORT) {
+                            // Если есть совпадения, добавляем в отчет
+                            this.process_operation.report!.set(item_tuple[0], {
+                                uri_display: (item_tuple[1] === null) ? '<unknown>' : (item_tuple[1].length > 0) ? item_tuple[1] : '<empty>',
+                                sins: sins
+                            });
+                        } else {
+                            // Если есть совпадения (всегда одно в режиме LAZY), генерируем сигнал 'matched-result' ...
+                            this.emit('matched-result', item_tuple[0], sins[0]);
+                        }
+                    } else {
+                        // Если совпадений не было - добавляем в кэш чистых файлов ...
+                        this.add_to_trustworthy_list(item_tuple[0]);
+                    }
+
+                }
+            }
+
+            // Проверяем завершение (список пуст?)...
+            if (items_infos.length === 0) {
 
                 clearInterval(this.process_operation.source!);
                 this.process_operation.source = null;
@@ -930,47 +971,6 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                 return;
             }
 
-            // Определяем количество элементов для обработки (пакета) в этом цикле
-            const end_index = Math.min(
-                this.process_operation.current_index + this.process_operation.batch_size,
-                items_infos.length
-            );
-
-            // Обрабатываем пакет элементов
-            for (let i = this.process_operation.current_index; i < end_index; i++) {
-
-                const current_item_info = items_infos[i]; // [0] - URI, [1] - URI display
-
-
-                // Проверяем, не находится ли файл уже в кэше чистых,
-                // если да - пропускаем. Если нет - проверяем ...
-                if (!this.trustworthy_list.has(current_item_info[0])) {
-
-                    // Проверяем на совпадение критериев
-                    const sins = this.check_criteria(current_item_info[1], mode);
-
-                    if (sins.length > 0) {
-                        if (mode === ProcessMode.REPORT) {
-                            // Если есть совпадения, добавляем в отчет
-                            this.process_operation.report!.set(current_item_info[0], {
-                                uri_display: (current_item_info[1] === null) ? '<unknown>' : (current_item_info[1].length > 0) ? current_item_info[1] : '<empty>',
-                                sins: sins
-                            });
-                        } else {
-                            // Если есть совпадения (всегда одно в режиме LAZY), генерируем сигнал 'matched-result' ...
-                            this.emit('matched-result', current_item_info[0], sins[0]);
-                        }
-                    } else {
-                        // Если совпадений не было - добавляем в кэш чистых файлов ...
-                        this.add_to_trustworthy_list(current_item_info[0]);
-                    }
-
-                }
-            }
-
-            // Обновляем индекс на размер обработанного пакета
-            this.process_operation.current_index = end_index;
-
         } catch (error) {
             clearInterval(this.process_operation.source!);
             this.process_operation.source = null;
@@ -980,34 +980,22 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         }
     };
 
-    private check_criteria(uri_display: string | null, mode: ProcessMode): SinsInfo[] {
+    private check_criteria(uri_display: string | null, mode: ProcessMode): SinInfo[] {
 
-        const sins = [] as SinsInfo[];
+        const sins = [] as SinInfo[];
 
         if (uri_display !== null && uri_display.length > 0) {
             // Проверяем файл по критериям
-            for (const criterion of this.eligibility_criteria!) {
+            for (const criterion of this.eligibility_criteria) {
 
-                switch (criterion.type) {
-                    // GLOB
-                    case 'glob': {
-                        if ((criterion as CompiledCriteriaSpec<'glob'>).pattern_spec.match_string(uri_display)) {
-                            sins.push({
-                                type: criterion.type,
-                                label: (criterion as CompiledCriteriaSpec<'glob'>).label
-                            });
-                        }
-                        break;
-                    }
-                    default: {
-                        const _type: never = criterion.type;
-                        console.assert(false, `Unknown CriteriaType: ${_type}`);
-                        break;
-                    }
+                const sin = this.get_sin(criterion, uri_display);
+
+                if (sin !== undefined) {
+                    sins.push(sin);
                 }
 
                 // Для быстрого режима прерываем после первого совпадения
-                if (sins.length > 0 && mode === ProcessMode.LAZY) {
+                if (mode === ProcessMode.LAZY && sins.length > 0) {
                     break;
                 }
             }
@@ -1024,7 +1012,32 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
     }
 
+    private get_sin(criterion: CompiledCriteriaSpec<CriteriaType>, uri_display: string): SinInfo | undefined {
+        switch (criterion.type) {
+            // GLOB
+            case 'glob': {
+                if ((criterion as CompiledCriteriaSpec<'glob'>).pattern_spec.match_string(uri_display)) {
+                    return {
+                        type: criterion.type,
+                        label: criterion.label
+                    };
+                }
+                break;
+            }
+            // ---
+            default: {
+                const _type: never = criterion.type;
+                console.assert(false, `Unknown CriteriaType: ${_type}`);
+                break;
+            }
+        }
+
+        return undefined;
+    }
+
     /** Запускает обработку, генерируя отчет (без сигналов).
+     *
+     * @affects items_infos Будет очищен после обработки.
      *
      * @see {@link do_process} */
     public inspect_to_report(items_info: RecentItemTuple[]): Promise<Report> {
@@ -1032,6 +1045,8 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
     }
 
     /** Запускает "фоновую" проверку, генерируя сигналы `matched-result` (без отчета).
+     *
+     * @affects items_infos Будет очищен после обработки.
      *
      * @fires 'matched-result'
      *
