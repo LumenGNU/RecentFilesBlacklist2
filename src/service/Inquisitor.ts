@@ -1,8 +1,18 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 2.2.2 */
+/** @version: 2.3.2 */
 /**
  * @changelog
+ *
+ * # 2.3.2 - Рефакторинг
+ *
+ * # 2.3.1 - check_criteria - теперь генератор
+ *
+ * # 2.3.0 - Изменена логика формирования отчета
+ *           в режиме Report.
+ *           Теперь в отчет попадают все записи из
+ *           исходного списка, независимо от
+ *           совпадений.
  *
  * # 2.2.2 - Стабильная версия
  *         - Рефакторинг
@@ -156,8 +166,7 @@ export interface ProcessOperation<T = unknown> {
     report?: Report;
 }
 
-type URI = string;
-export type Report = Map<URI, { uri_display: string; sins: SinInfo[]; }>;
+export type Report = Map<string, { uri_display: string; sins: SinInfo[]; }>;
 
 /** Ошибка прерывания процесса проверки.
  *
@@ -373,9 +382,9 @@ export class SetCriteriaCancelledError extends Error {
  * - Подходит для быстрого анализа, для отображения результатов в UI
  *
  * ### `inspect_to_signals()` (Для фоновой работы. Для генерации сигналов)
- * - Останавливает проверку записи после первого совпадения
+ * - Останавливает проверку записи на критерии после первого совпадения
  * - Вставляет паузы между проверками (`PROCESS_INTERVAL` мс)
- * - Для каждого совпадения с критерием генерирует сигнал `matched-result`
+ * - Для каждого совпадения генерирует сигнал `matched-result`
  * - Минимизирует нагрузку на систему
  * - Подходит для фоновой обработки без нагрузки на систему
  *
@@ -524,7 +533,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * - Использует FIFO для вытеснения старых записей
      *
      * @see {@link add_to_trustworthy_list} Добавление в кэш */
-    private trustworthy_list = new Set<URI>();
+    private trustworthy_list = new Set<string>();
 
     /** Состояние текущего процесса проверки.
      *
@@ -668,7 +677,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * }
      * ```
      * */ // @todo Нужны более четкие описания ошибок валидации и информация о проблемном критерии
-    public set_criteria(criteria: CriteriaSpec<CriteriaType>[]): Promise<void> {
+    public set_criteria(criteria: readonly CriteriaSpec<CriteriaType>[]): Promise<void> {
 
         // Новая операция отменяет все предыдущие
 
@@ -794,6 +803,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * с ошибкой `ProcessAbortError`.
      *
      * @param [msg='aborted'] Сообщение для `ProcessAbortError`. По умолчанию `Process aborted`
+     *        Специфичное сообщение для возможности различения причин прерывания
      *
      * @returns true, если процесс был прерван;
      *          false, если активного процесса не было
@@ -929,32 +939,44 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             const items_batch = items_infos.splice(0, (mode === ProcessMode.REPORT) ? Inquisitor.BATCH_SIZE : 1);
             for (const item_tuple of items_batch) {
 
-                // item_tuple[0] - uri
-                // item_tuple[1] - uri_display
+                const uri_display = item_tuple.pop() as string | null;
+                const uri = item_tuple.pop() as string;
+
+                const sins: SinInfo[] = [];
 
                 // Проверяем, не находится ли файл уже в кэше чистых,
-                // если да - пропускаем. Если нет - проверяем ...
-                if (!this.trustworthy_list.has(item_tuple[0])) {
+                // если да - пропускаем. Если нет - проверяем
+                if (!this.trustworthy_list.has(uri)) {
 
-                    // Проверяем на совпадение критериев
-                    const sins = this.check_criteria(item_tuple[1], mode);
-
-                    if (sins.length > 0) {
-                        if (mode === ProcessMode.REPORT) {
-                            // Если есть совпадения, добавляем в отчет
-                            this.process_operation.report!.set(item_tuple[0], {
-                                uri_display: (item_tuple[1] === null) ? '<unknown>' : (item_tuple[1].length > 0) ? item_tuple[1] : '<empty>',
-                                sins: sins
-                            });
-                        } else {
-                            // Если есть совпадения (всегда одно в режиме LAZY), генерируем сигнал 'matched-result' ...
-                            this.emit('matched-result', item_tuple[0], sins[0]);
+                    // Проверяем на совпадение критериев, собираем грехи
+                    const check_criteria = this.check_criteria(uri_display);
+                    for (const sin of check_criteria) {
+                        sins.push(sin);
+                        // Для ленивого режима прерываем проверку после любого первого совпадения
+                        if (mode === ProcessMode.LAZY) {
+                            console.assert(sins.length === 1, 'В режиме LAZY должно быть только одно совпадение!');
+                            // В режиме LAZY - Если есть совпадения (всегда одно в режиме LAZY), генерируем сигнал 'matched-result'
+                            this.emit('matched-result', uri, sins[0]);
+                            check_criteria.return();
+                            break;
                         }
-                    } else {
-                        // Если совпадений не было - добавляем в кэш чистых файлов ...
-                        this.add_to_trustworthy_list(item_tuple[0]);
                     }
 
+                    if (sins.length === 0) {
+                        // Если совпадений не было - добавляем в кэш чистых файлов ...
+                        this.add_to_trustworthy_list(uri);
+                    }
+
+                }
+
+                if (mode === ProcessMode.REPORT) {
+                    // в режиме REPORT, добавляем в отчет каждый элемент с его результатом проверки
+                    console.assert(this.process_operation.report !== undefined, 'process_operation.report !== undefined');
+                    console.assert(!this.process_operation.report!.has(uri), 'process_operation.report!.has(uri)');
+                    this.process_operation.report!.set(uri, {
+                        uri_display: (uri_display === null) ? '<unknown>' : (uri_display.length > 0) ? uri_display : '<empty>',
+                        sins: sins
+                    });
                 }
             }
 
@@ -980,36 +1002,28 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         }
     };
 
-    private check_criteria(uri_display: string | null, mode: ProcessMode): SinInfo[] {
+    private *check_criteria(uri_display: string | null): Generator<SinInfo, void, unknown> {
 
-        const sins = [] as SinInfo[];
-
+        // guard condition - проверка предварительных условий
         if (uri_display !== null && uri_display.length > 0) {
             // Проверяем файл по критериям
             for (const criterion of this.eligibility_criteria) {
 
                 const sin = this.get_sin(criterion, uri_display);
 
-                if (sin !== undefined) {
-                    sins.push(sin);
-                }
-
-                // Для быстрого режима прерываем после первого совпадения
-                if (mode === ProcessMode.LAZY && sins.length > 0) {
-                    break;
+                if (sin) {
+                    yield sin;
                 }
             }
 
         } else {
-            // безоговорочно сообщаем о файлах без отображаемого пути
-            sins.push({
+            yield {
                 type: 'lint',
                 label: 'MISSING-DISPLAY-URI'
-            });
+            };
         }
 
-        return sins;
-
+        return;
     }
 
     private get_sin(criterion: CompiledCriteriaSpec<CriteriaType>, uri_display: string): SinInfo | undefined {
@@ -1117,7 +1131,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      * ``` */
     public decommission(): void {
 
-        this.process_abort(`Object is being decommissioned`);
+        this.process_abort('Object is being decommissioned');
 
         // отменяем операцию установки критериев, если она выполняется
         if (this.criteria_operation.source) {
