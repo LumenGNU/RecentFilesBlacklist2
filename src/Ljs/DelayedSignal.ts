@@ -1,8 +1,11 @@
-/** @file: src/shared/DelayedSignal.ts */
+/** @file: src/Ljs/DelayedSignal.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version:  2.0.1 */
+/** @version:  2.1.0 */
 /**
  * @changelog
+ *
+ * # 2.1.0 - Добавлено свойство `debounce_delay`
+ *         - рефакторинг
  *
  * # 2.0.1 - Проходит тесты
  *
@@ -13,7 +16,9 @@
 import GObject from 'gi://GObject';
 import GLib from 'gi://GLib?version=2.0';
 
-import { GObjectDecorator } from './gobject-decorators.js';
+import {
+    GObjectDecorator
+} from './GObjectDecorators.js';
 
 
 /** Класс, реализующий паттерн "debounce" на базе сигналов GObject.
@@ -91,23 +96,27 @@ export class DelayedSignal extends GObject.Object {
     private timer: GLib.Source | null = null;
 
     /** Задержка в миллисекундах */
-    private debounce_interval: number;
+    private delay: number;
 
     /** Создает новый объект-эмиттер с механизмом debounce.
      *
-     * @param debounce_interval Задержка в миллисекундах. Должно быть положительным целым числом.
+     * @param delay Задержка в миллисекундах. Должно быть положительным целым числом.
      *
      * @throws {TypeError} Если debounce_interval не является положительным целым числом
      */
-    constructor(debounce_interval: number) {
+    constructor(delay: number) {
 
-        debounce_interval = Number(debounce_interval);
-        if (!Number.isInteger(debounce_interval) || debounce_interval <= 0) {
+        delay = Number(delay);
+        if (!Number.isInteger(delay) || delay <= 0) {
             throw new TypeError('DelayedSignal: Interval must be a positive integer');
         }
 
         super();
-        this.debounce_interval = debounce_interval;
+        this.delay = delay;
+    }
+
+    public get debounce_delay(): number {
+        return this.delay;
     }
 
     /** Проверить, запланирована ли отложенная эмиссия.
@@ -157,7 +166,7 @@ export class DelayedSignal extends GObject.Object {
         this.timer = setTimeout(() => {
             this.timer = null;
             this.emit('occurred');
-        }, this.debounce_interval);
+        }, this.delay);
     }
 
     /** Немедленно эмиттить сигнал, независимо от состояния таймера.
