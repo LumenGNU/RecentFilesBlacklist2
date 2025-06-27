@@ -1,8 +1,11 @@
 /** @file: src/Ljs/Entry.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.0.0 */
+/** @version: 1.1.0 */
 /**
  * @changelog
+ *
+ * # 1.1.0 - Упрощенный вариант позиционирования
+ *           контекстного меню
  *
  * # 1.0.0 - Первый вариант
 */
@@ -19,6 +22,8 @@ import {
 import {
     IDecommissionable,
     DecommissionedError,
+    DecommissionType,
+    DECOMMISSIONED,
     decommission_signals
 } from './Decommissionable.js';
 
@@ -45,14 +50,14 @@ export type EntryConstructorProps = Omit<Gtk.Entry.ConstructorProps, 'truncate_m
  * ### API
  *
  * #### Параметры конструктора:
- * - `debounce_delay` задержка для debounced сигнала (мс, минимум DEFAULT_TIMEOUT)
+ * - `debounce_delay` задержка для debounced сигнала (мс, минимум DEFAULT_DELAY)
  * - все стандартные параметры Gtk.Entry (`truncate_multiline` игнорируется и всегда будет true)
  *
  * #### Сигналы:
  * - `'debounced-changed'` испускается через `debounce_delay` мс после последнего изменения текста
  *
  * #### Константы:
- * - `DEFAULT_TIMEOUT` минимальная задержка для debounced сигнала (330мс)
+ * - `DEFAULT_DELAY` минимальная задержка для debounced сигнала (330мс)
  *
  * #### Свойства:
  * - `truncate_multiline` всегда true, предотвращает GTK assertion ошибки
@@ -137,6 +142,8 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
 
     }
 
+    // #region Свойства truncate_multiline
+
     /** Переопределение `truncate_multiline` для предотвращения GTK assertion ошибок.
      * Всегда устанавливает значение в **true** независимо от переданного параметра.
      *
@@ -153,6 +160,8 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
         return super.truncate_multiline;
     }
 
+    // #endregion
+
     /** Возвращает используемою задержку для debounced-сигнала в миллисекундах. */
     get debounce_delay(): number {
         if (this.debounced.changes === undefined) {
@@ -166,7 +175,8 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
      *
      * @see {@link https://gjs.guide/guides/gobject/subclassing.html#default-handler Default handler для сигнала 'changed' (GJS автоматически подключает on_* методы)}.
      *
-     * @fires 'debounced-changed' (с задержкой)
+     * @fires DelayedSignal#'occurred' Через debounce_delay после изменения
+     * @fires Entry#'debounced-changed' (отложенный) Когда DelayedSignal испускает 'occurred'
      *
      * @throws DecommissionedError если объект уже деактивирован */
     private on_changed() {
@@ -199,19 +209,10 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
      * кнопку мыши.
      *
      * Решение:
-     * 1. Отключает стандартную реакцию на правую кнопку мыши
-     * 2. Добавляет собственный gesture controller для правой кнопки
-     * 3. Вызывает menu.popup action программно
+     * 1. Отключать стандартную реакцию на правую кнопку мыши
+     * 2. Добавлять собственный gesture controller для правой кнопки
+     * 3. Вызывать menu.popup action программно
      * 4. Корректно позиционировать меню
-     *
-     * Сейчас используется frame clock API для выдержки правильных
-     * интервалов при показе контекстного меню.
-     * Frame count логика:
-     * - 0 кадров: система создает и подключает меню к виджету
-     * - n-1 кадр: подготовка к показу
-     * - n кадр: финальное позиционирование меню
-     *
-     * Сейчас используется n=9 кадров.
      *
      * @param entry Entry для которого применяется фикс */
     private static fix_entry_context_menu(entry: Gtk.Entry): void {
@@ -238,50 +239,34 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
             text_area.activate_action('menu.popup', null);
 
             // То, что происходит в этом цикле направлено на улучшение
-            // UX, и от этого, впринципе, можно отказаться.
-            // Задача этого кода - спозиционировать меню центрально относительно
+            // UX, и от этого, в принципе, можно отказаться.
+            // Задача этого кода - спозиционировать меню красиво, относительно
             // курсора мыши. А после закрытия меню, вернуть его в исходное положение
             // (в начало виджета) для правильного отображения при вызове с клавиатуры.
             // Находим созданное popover меню...
+            // В gtk контекстное меню поля вводе не статическое, и создается после первого
+            // вызова, и возможно, ?может быть уничтожено? по мере необходимости.
             let popover = text_area.get_first_child();
             while (popover) {
                 if (popover instanceof Gtk.PopoverMenu) {
+                    // Скрываем меню на начальной фазе
+                    // Предотвращаем графические артефакты
+                    popover.set_visible(false);
+                    // Сразу перемещаем к курсору
+                    popover.set_offset(x - 32, 0);
 
                     // Frame clock workaround для корректного позиционирования
-                    let frame_count = 9;
                     const tid = popover.add_tick_callback((popover: Gtk.Widget, _frame_clock: Gdk.FrameClock): boolean => {
-                        if (frame_count === 9) {
-                            // Скрываем меню на начальной фазе
-                            // Предотвращаем графические артефакты
-                            popover.set_visible(false);
+                        popover.set_visible(true);
+                        if (popover instanceof Gtk.PopoverMenu) {
+                            // Сброс offset и отключение tick callback при закрытии меню
+                            const hid = popover.connect('closed', (sender) => {
+                                sender.set_offset(0, 0);
+                                sender.remove_tick_callback(tid);
+                                sender.disconnect(hid);
+                            });
                         }
-
-                        if (frame_count === 2) {
-                            // Если отдалить этот кадр от следующего то будет
-                            // эффект "прыжка", что не красиво если поле ввода широкое
-                            // Показываем меню
-                            popover.set_visible(true);
-                            // поместить это в финальный кадр - тоже не возможно:
-                            // нужно дать время для правильного расчета размера,
-                            // иначе ширина меню всегда будет получена как 70, что неправильно
-                        }
-
-                        if (frame_count === 1) {
-                            if (popover instanceof Gtk.PopoverMenu) {
-
-                                // Финальное позиционирование меню
-                                popover.set_offset(x - (popover.get_first_child()!.get_width() / 2), 0);
-
-                                // Сброс offset и отключение tick callback при закрытии меню
-                                const hid = popover.connect('closed', (sender) => {
-                                    popover.set_offset(0, 0);
-                                    popover.remove_tick_callback(tid);
-                                    sender.disconnect(hid);
-                                });
-                            }
-                        }
-
-                        return --frame_count > 0;
+                        return Gdk.EVENT_STOP;
                     });
 
                     // Нашли - прерываем цикл
@@ -300,13 +285,25 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
 
     /** Деактивация Entry и освобождение ресурсов.
      * Отключает все сигналы и останавливает debounced механизм.
-     * После вызова объект нельзя использовать. */
-    public decommission(): void {
-        this.debounced.changes.cancel();
+     * После вызова объект нельзя использовать.
+     *
+     * @affects this.debounced.changes Будет выведен из эксплуатации
+     * @affects this.debounced.changes Будет равен undefined
+     * @affects Все внутренние сигналы будут отключены
+     * @affects this.decommission Будет равен false
+     *  */
+    public decommission: DecommissionType = () => {
+
+        if (this.debounced.changes.decommission) {
+            this.debounced.changes.decommission();
+        }
+
         decommission_signals(this.debounced.changes, this.debounced.handler_id);
 
         this.debounced.changes = undefined as unknown as typeof this.debounced.changes;
-    }
+
+        this.decommission = DECOMMISSIONED;
+    };
 
     // #region Фабричные методы
 
