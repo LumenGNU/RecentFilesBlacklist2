@@ -1,8 +1,10 @@
 /** @file: src/service/Inquisitor.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 2.3.2 */
+/** @version: 2.3.3 */
 /**
  * @changelog
+ *
+ * # 2.3.3 - Рефакторинг
  *
  * # 2.3.2 - Рефакторинг
  *
@@ -55,26 +57,26 @@ import GObject from 'gi://GObject?version=2.0';
 import GLib from 'gi://GLib?version=2.0';
 
 import {
-    Decommissionable,
-    DecommissionedError
-} from '../shared/Decommissionable.interface.js';
+    IDecommissionable,
+    DecommissionedError,
+    DECOMMISSIONED,
+    DecommissionType
+} from '../Ljs/Decommissionable.js';
 import {
-    GObjectDecorator
-} from '../shared/gobject-decorators.js';
+    GDecorator
+} from '../Ljs/GObjectDecorators.js';
 import type {
     SourceID,
-    PromiseControllers,
+    PromiseController,
     RecentItemTuple,
+    Report,
+    CriteriaType,
+    SinInfo,
+    ReportItem,
 } from '../shared/common-types.js';
 import {
     NO_SOURCE,
 } from '../shared/common-types.js';
-
-
-/** Тип критерия */
-export type CriteriaType =
-    /** Фильтр на основе glob-шаблона */
-    'glob';
 
 /** Карта типов критериев фильтрации файлов.
  *
@@ -130,20 +132,6 @@ type CompiledCriteriaSpec<CriteriaType extends keyof CompiledCriteriaMap> = {
     label: string,
 } & CompiledCriteriaMap[CriteriaType];
 
-/** Информация о совпавшем критерии.
- *
- * Используется в отчетах и сигналах для описания
- * почему файл был помечен для удаления. */
-export interface SinInfo {
-    /** Тип сработавшего критерия.
-     * Может быть как пользовательский тип (из CriteriaType),
-     * так и внутренний тип 'lint' для файлов с проблемами */
-    type: CriteriaType | 'lint',
-    /** Метка сработавшего критерия.
-     * Для типа 'lint' может быть 'MISSING-DISPLAY-URI' */
-    label: string,
-}
-
 /** Режимы проверки */
 export enum ProcessMode {
     /** Ленивый режим.
@@ -162,11 +150,9 @@ export enum ProcessMode {
 
 export interface ProcessOperation<T = unknown> {
     source: SourceID;
-    controller: PromiseControllers<T>;
+    controller: PromiseController<T>;
     report?: Report;
 }
-
-export type Report = Map<string, { uri_display: string; sins: SinInfo[]; }>;
 
 /** Ошибка прерывания процесса проверки.
  *
@@ -456,7 +442,7 @@ export class SetCriteriaCancelledError extends Error {
  * - В ленивом режиме распределяет нагрузку по времени
  * - Поддерживает возможность прерывание длительных операций
  * */
-@GObjectDecorator.Class({
+@GDecorator.Class({
     Signals: {
         /** Генерируется после проверки каждого файла, если были совпадения с критериями. */
         'matched-result': {
@@ -471,7 +457,7 @@ export class SetCriteriaCancelledError extends Error {
     GTypeFlags: GObject.TypeFlags.FINAL,
     GTypeName: 'Inquisitor',
 })
-export class Inquisitor extends GObject.Object implements Decommissionable {
+export class Inquisitor extends GObject.Object implements IDecommissionable {
 
     /** Максимальный размер кэша для хранения "чистых" URI.
      *
@@ -573,7 +559,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         controller: {
             reject: undefined,
             resolve: undefined
-        } as PromiseControllers<void>,
+        } as PromiseController<void>,
     };
 
 
@@ -607,7 +593,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *     console.log(`Установлено ${criteria.length} критериев`);
      * }
      * ``` */
-    @GObjectDecorator.JSObjectProperty({
+    @GDecorator.JSObjectProperty({
         flags: GObject.ParamFlags.READABLE
     })
     public get criteria(): CompiledCriteriaSpec<CriteriaType>[] {
@@ -901,11 +887,12 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         items_infos: RecentItemTuple[],
         mode: ProcessMode
     ): Promise<T> {
+
         // Прерываем текущую обработку, если она запущена
         this.process_abort('New process will be initiated');
 
         if (mode === ProcessMode.REPORT) {
-            this.process_operation.report = new Map();
+            this.process_operation.report = [];
         } else {
             this.process_operation.report = undefined;
         }
@@ -915,7 +902,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
 
             // Сохраняем контроллеры
             this.process_operation.controller.reject = reject;
-            (this.process_operation.controller as PromiseControllers<T>).resolve = resolve;
+            (this.process_operation.controller as PromiseController<T>).resolve = resolve;
 
             // Запускаем интервал для обработки
             // --------------------------------
@@ -939,8 +926,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             const items_batch = items_infos.splice(0, (mode === ProcessMode.REPORT) ? Inquisitor.BATCH_SIZE : 1);
             for (const item_tuple of items_batch) {
 
-                const uri_display = item_tuple.pop() as string | null;
-                const uri = item_tuple.pop() as string;
+                const [uri, uri_display] = item_tuple;
 
                 const sins: SinInfo[] = [];
 
@@ -972,11 +958,11 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                 if (mode === ProcessMode.REPORT) {
                     // в режиме REPORT, добавляем в отчет каждый элемент с его результатом проверки
                     console.assert(this.process_operation.report !== undefined, 'process_operation.report !== undefined');
-                    console.assert(!this.process_operation.report!.has(uri), 'process_operation.report!.has(uri)');
-                    this.process_operation.report!.set(uri, {
-                        uri_display: (uri_display === null) ? '<unknown>' : (uri_display.length > 0) ? uri_display : '<empty>',
-                        sins: sins
-                    });
+                    this.process_operation.report!.push([
+                        uri,
+                        (uri_display === null) ? '<unknown>' : (uri_display.length > 0) ? uri_display : '<empty>',
+                        sins
+                    ] as ReportItem);
                 }
             }
 
@@ -986,9 +972,9 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
                 clearInterval(this.process_operation.source!);
                 this.process_operation.source = null;
                 if (mode === ProcessMode.REPORT) {
-                    (this.process_operation.controller as PromiseControllers<Report>).resolve!(this.process_operation.report!);
+                    (this.process_operation.controller as PromiseController<Report>).resolve!(this.process_operation.report!);
                 } else {
-                    (this.process_operation.controller as PromiseControllers<void>).resolve!();
+                    (this.process_operation.controller as PromiseController<void>).resolve!();
                 }
                 return;
             }
@@ -1017,10 +1003,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             }
 
         } else {
-            yield {
-                type: 'lint',
-                label: 'MISSING-DISPLAY-URI'
-            };
+            yield ['lint', 'MISSING-DISPLAY-URI'];
         }
 
         return;
@@ -1031,10 +1014,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
             // GLOB
             case 'glob': {
                 if ((criterion as CompiledCriteriaSpec<'glob'>).pattern_spec.match_string(uri_display)) {
-                    return {
-                        type: criterion.type,
-                        label: criterion.label
-                    };
+                    return [criterion.type, criterion.label];
                 }
                 break;
             }
@@ -1129,7 +1109,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
      *     console.error('Объект выведен из эксплуатации');
      * }
      * ``` */
-    public decommission(): void {
+    public decommission: DecommissionType = () => {
 
         this.process_abort('Object is being decommissioned');
 
@@ -1156,5 +1136,7 @@ export class Inquisitor extends GObject.Object implements Decommissionable {
         this.trustworthy_list = (undefined as unknown as typeof this.trustworthy_list);
         this.process_operation = (undefined as unknown as typeof this.process_operation);
         this.criteria_operation = (undefined as unknown as typeof this.criteria_operation);
-    }
+
+        this.decommission = DECOMMISSIONED;
+    };
 }
