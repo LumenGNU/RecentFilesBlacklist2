@@ -1,8 +1,10 @@
 /** @file: src/Ljs/DelayedSignal.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version:  2.1.0 */
+/** @version:  2.2.0 */
 /**
  * @changelog
+ *
+ * # 2.2.0 - Добавлен SignalsInterface, типизация сигналов
  *
  * # 2.1.0 - Добавлено свойство `debounce_delay`
  *         - рефакторинг
@@ -17,9 +19,23 @@ import GObject from 'gi://GObject';
 import GLib from 'gi://GLib?version=2.0';
 
 import {
-    GObjectDecorator
+    GDecorator
 } from './GObjectDecorators.js';
 
+import {
+    IDecommissionable,
+    DecommissionType,
+    DECOMMISSIONED,
+    DecommissionedError
+} from './Decommissionable.js';
+
+interface DelayedSignalSignatures {
+    'scheduled': () => void;
+    'occurred': () => void;
+    'canceled': () => void;
+}
+
+type SignalSignatures = DelayedSignalSignatures & GObject.Object.SignalSignatures;
 
 /** Класс, реализующий паттерн "debounce" на базе сигналов GObject.
  *
@@ -67,7 +83,7 @@ import {
  * // через 300мс → 'occurred'
  * ~~~
  */
-@GObjectDecorator.Class({
+@GDecorator.Class({
     GTypeName: 'DelayedSignal',
     Signals: {
 
@@ -80,19 +96,39 @@ import {
          *
          * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
         'scheduled': {},
+
         /** Сигнал, эмитируемый когда срабатывает таймер (по истечении `debounce_interval`)
          * или при немедленной эмиссии через invoke()/flush().
          *
          * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
         'occurred': {},
+
         /** Сигнал, эмитируемый при отмене запланированной эмиссии.
          *
          * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
         'canceled': {}
     }
 })
-export class DelayedSignal extends GObject.Object {
+export class DelayedSignal extends GObject.Object implements IDecommissionable {
 
+    // #region SignalsInterface
+    // ------------------------
+
+    override emit<K extends keyof SignalSignatures>(signal: K, ...args: Parameters<SignalSignatures[K]>): ReturnType<SignalSignatures[K]> {
+        return super.emit(signal, ...args) as ReturnType<SignalSignatures[K]>;
+    }
+
+    override connect<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
+        return super.connect(signal, callback);
+    }
+
+    override connect_after<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
+        return super.connect_after(signal, callback);
+    }
+
+    // #endregion
+
+    /** Активный таймер. */
     private timer: GLib.Source | null = null;
 
     /** Задержка в миллисекундах */
@@ -102,8 +138,7 @@ export class DelayedSignal extends GObject.Object {
      *
      * @param delay Задержка в миллисекундах. Должно быть положительным целым числом.
      *
-     * @throws {TypeError} Если debounce_interval не является положительным целым числом
-     */
+     * @throws {TypeError} Если debounce_interval не является положительным целым числом */
     constructor(delay: number) {
 
         delay = Number(delay);
@@ -116,13 +151,15 @@ export class DelayedSignal extends GObject.Object {
     }
 
     public get debounce_delay(): number {
+        if (this.delay === undefined) {
+            throw new DecommissionedError();
+        }
         return this.delay;
     }
 
     /** Проверить, запланирована ли отложенная эмиссия.
      *
-     * @returns true если таймер активен, false если нет
-     */
+     * @returns true если таймер активен, false если нет */
     public is_pending(): boolean {
         return this.timer !== null;
     }
@@ -154,8 +191,7 @@ export class DelayedSignal extends GObject.Object {
      * delayed_signal.pending_invoke(); // только сброс таймера
      * delayed_signal.pending_invoke(); // только сброс таймера
      * // через 300мс → 'occurred'
-     * ~~~
-     * */
+     * ~~~ */
     pending_invoke(): void {
         if (this.timer) {
             clearTimeout(this.timer);
@@ -180,8 +216,7 @@ export class DelayedSignal extends GObject.Object {
     * // Немедленное выполнение
     * delayed_signal.pending_invoke(); // запланировали
     * delayed_signal.invoke();         // → 'occurred' сразу
-     * ~~~
-     * */
+     * ~~~ */
     public invoke(): void {
         if (this.timer) {
             clearTimeout(this.timer);
@@ -203,8 +238,7 @@ export class DelayedSignal extends GObject.Object {
      * // ...
      * delayed_signal.flush(); // → 'occurred'
      * delayed_signal.flush(); // ничего не происходит
-     * ~~~
-     *  */
+     * ~~~ */
     public flush(): void {
         if (this.timer) {
             clearTimeout(this.timer);
@@ -218,15 +252,14 @@ export class DelayedSignal extends GObject.Object {
      *
      * Ничего не делает если таймер не был запущен.
      *
-     * @fires DelayedSignal#canceled Только если таймер был активен
+     * @fires DelayedSignal#'canceled' Только если таймер был активен
      *
      * @example
      * ~~~typescript
      * delayed_signal.pending_invoke(); // запланировали
      * delayed_signal.cancel();         // → 'canceled', таймер отменен
      * // сигнал 'occurred' НЕ будет эмиттирован
-     * ~~~
-     *  */
+     * ~~~ */
     public cancel(): void {
         if (this.timer) {
             clearTimeout(this.timer);
@@ -234,4 +267,29 @@ export class DelayedSignal extends GObject.Object {
             this.emit('canceled');
         }
     }
+
+    public decommission: DecommissionType = () => {
+
+        // Останавливаем таймер
+        this.cancel();
+
+        function throw_decommissioned(): never {
+            throw new DecommissionedError();
+        }
+
+        // "Ломаем" все публичные методы
+        this.emit = (throw_decommissioned as typeof this.emit);
+        this.connect = (throw_decommissioned as typeof this.connect);
+        this.connect_after = (throw_decommissioned as typeof this.connect_after);
+        this.is_pending = (throw_decommissioned as typeof this.is_pending);
+        this.pending_invoke = (throw_decommissioned as typeof this.pending_invoke);
+        this.invoke = (throw_decommissioned as typeof this.invoke);
+        this.flush = (throw_decommissioned as typeof this.flush);
+        this.cancel = (throw_decommissioned as typeof this.cancel);
+
+        this.timer = undefined as unknown as typeof this.timer;
+        this.delay = undefined as unknown as typeof this.delay;
+
+        this.decommission = DECOMMISSIONED;
+    };
 }
