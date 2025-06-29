@@ -32,49 +32,293 @@
     },
     "homepage": "https://github.com/LumenGNU/RecentFilesBlacklist2#readme",
     "sideEffects": false,
-    "projectStructure": {
-        "root/": {
-            "description": "Root directory",
-            "files": {
-                "tsconfig.json": {
-                    "description": "TypeScript configuration file"
-                },
-                "eslint.config.js": {
-                    "description": "ESLint configuration file"
-                }
-            },
-            "src/": {
-                "description": "Source files root directory",
-                "service/": {
-                    "description": "Source files for RecentFilesService",
-                    "files": {
-                        "RecentFilesService.ts": {
-                            "description": "Main source file for RecentFilesService"
+    "projectStructure": [
+        {
+            "type": "directory",
+            "name": ".",
+            "contents": [
+                {
+                    "type": "directory",
+                    "name": "dev-scripts",
+                    "info": "Скрипты/утилиты разработчика",
+                    "contents": [
+                        {
+                            "type": "file",
+                            "name": "chmod"
+                        },
+                        {
+                            "type": "file",
+                            "name": "compile"
+                        },
+                        {
+                            "type": "file",
+                            "name": "lint_file"
+                        },
+                        {
+                            "type": "file",
+                            "name": "list_tasks"
+                        },
+                        {
+                            "type": "file",
+                            "name": "tsconfig_for"
                         }
-                    }
+                    ]
+                },
+                {
+                    "type": "file",
+                    "name": "eslint.config.js",
+                    "info": "ESLint configuration file"
+                },
+                {
+                    "type": "file",
+                    "name": ".info",
+                    "info": "Project Files description"
+                },
+                {
+                    "type": "file",
+                    "name": "package.json",
+                    "info": "Package description"
+                },
+                {
+                    "type": "file",
+                    "name": "package-lock.json"
+                },
+                {
+                    "type": "file",
+                    "name": "PROJECT_VISION.md"
+                },
+                {
+                    "type": "directory",
+                    "name": "schemas",
+                    "info": "GSettings schemas directory",
+                    "contents": [
+                        {
+                            "type": "file",
+                            "name": "org.gnome.shell.extensions.recent-files-blacklist.gschema.xml",
+                            "info": "GSettings main schema file"
+                        }
+                    ]
+                },
+                {
+                    "type": "directory",
+                    "name": "src",
+                    "info": "Source files root directory",
+                    "contents": [
+                        {
+                            "type": "directory",
+                            "name": "client",
+                            "info": "Source files for Recent Files Blacklist D-Bus Client",
+                            "contents": [
+                                {
+                                    "type": "file",
+                                    "name": "Client.Clod.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "RecentFilesClient.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "ReportListBox.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "ServiceIndicator.ts"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "directory",
+                            "name": "extension",
+                            "info": "Source files for Recent Files Blacklist Gnome Shell Extension",
+                            "contents": [
+                                {
+                                    "type": "file",
+                                    "name": "extension.ts",
+                                    "info": "Main source file for Recent Files Blacklist Gnome Shell Extension"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "prefs.ts",
+                                    "info": "Source file for preference page Recent Files Blacklist Gnome Shell Extension"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "directory",
+                            "name": "Ljs",
+                            "info": "Классы, разработанные в пределах этого проекта и пригодные для использования в других проектах",
+                            "contents": [
+                                {
+                                    "type": "file",
+                                    "name": "AsyncIntervalAdapter.ts",
+                                    "info": "Обертка для выполнения итеративного кода в асинхронном контексте в GJS/GTK"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "Decommissionable.ts",
+                                    "info": "Интерфейс для объектов, поддерживающих освобождение ресурсов"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "DelayedSignal.ts",
+                                    "info": "Класс, реализующий паттерн \"debounce\" на базе сигналов GObject"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "Entry.ts",
+                                    "info": "Класс Gtk.Entry с расширенной функциональностью"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "GObjectDecorators.ts",
+                                    "info": "GObject декораторы для TypeScript"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "index.ts",
+                                    "info": "Модуль Ljs"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "Logger.ts",
+                                    "info": "Классы, реализующие логирование в GJS"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "directory",
+                            "name": "service",
+                            "info": "Source files for RecentFilesService",
+                            "contents": [
+                                {
+                                    "type": "file",
+                                    "name": "Inquisitor.ts",
+                                    "info": "Inquisitor - Проверяет список на соответствие заданным критериям фильтрации"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "RecentFilesProvider.ts",
+                                    "info": "RecentFilesProvider - взаимодействие с системным менеджером недавних файлов\nв GNOME"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "RecentFilesService.ts",
+                                    "info": "RecentFilesService - сервис для работы с недавними файлами (Recent Files) в\nсреде GNOME"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "SettingsProvider.ts",
+                                    "info": "SettingsProvider - провайдер настроек из GSettings"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "directory",
+                            "name": "shared",
+                            "info": "Shared modules",
+                            "contents": [
+                                {
+                                    "type": "file",
+                                    "name": "common-types.ts",
+                                    "info": "Общие для всего проекта типы и константы"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "dbus-decorators.ts"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "directory",
+                            "name": "specs",
+                            "info": "Тесты Jasmine",
+                            "contents": [
+                                {
+                                    "type": "file",
+                                    "name": "Aborter.test.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "AsyncIntervalAdapter.spec.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "gobject-decorators.spec.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "HistoryWatcher.test.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "Inquisitor.spec.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "Logger.test.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "RecentFilesProvider.spec.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "ReportListBox.test.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "SettingsProvider.test.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "TestWindow.test.ts"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "file",
+                    "name": "tsconfig.json",
+                    "info": "TypeScript configuration file"
+                },
+                {
+                    "type": "directory",
+                    "name": ".vscode",
+                    "info": "Директория конфигурации IDE",
+                    "contents": [
+                        {
+                            "type": "file",
+                            "name": "tasks.json",
+                            "info": "Список задач проекта"
+                        }
+                    ]
                 }
-            },
-            "schemas/": {
-                "description": "GSettings schemas directory"
-            },
-            "build/": {
-                "description": "Builded files root directory"
-            },
-            "dist/": {
-                "description": "Distribution files directory"
-            }
+            ]
+        },
+        {
+            "type": "report",
+            "directories": 11,
+            "files": 42
         }
-    },
+    ],
     "devDependencies": {
         "@anthropic-ai/claude-code": "^0.2.114",
         "@eslint/js": "^9.27.0",
-        "@girs/giounix-2.0": "^2.0.0-4.0.0-beta.23",
-        "@girs/gjs": "^4.0.0-beta.23",
-        "@girs/glibunix-2.0": "^2.0.0-4.0.0-beta.23",
-        "@girs/gnome-shell": "^48.0.2",
+        "@girs/adw-1": "^1.8.0-4.0.0-beta.25",
+        "@girs/gdk-4.0": "^4.0.0-4.0.0-beta.25",
+        "@girs/gio-2.0": "^2.84.2-4.0.0-beta.25",
+        "@girs/giounix-2.0": "^2.0.0-4.0.0-beta.25",
+        "@girs/gjs": "^4.0.0-beta.25",
+        "@girs/glibunix-2.0": "^2.0.0-4.0.0-beta.25",
+        "@girs/gobject-2.0": "^2.84.2-4.0.0-beta.25",
+        "@girs/gtk-4.0": "^4.19.1-4.0.0-beta.25",
+        "@girs/pango-1.0": "^1.56.4-4.0.0-beta.25",
         "@types/jasmine": "^5.1.8",
         "eslint": "^9.27.0",
         "madge": "^8.0.0",
+        "ts-node": "^10.9.2",
         "typescript": "^5.8.3",
         "typescript-eslint": "^8.32.1"
     },
