@@ -28,12 +28,16 @@
     "rootDir": "src",
     "outDir": "build",
     "types": [
+      "@girs/adw-1",
+      "@girs/gdk-4.0",
+      "@girs/gio-2.0",
+      "@girs/giounix-2.0",
       "@girs/gjs",
       "@girs/gjs/dom",
-      "@girs/gnome-shell/ambient",
-      "@girs/gnome-shell/extensions/global",
-      "@girs/giounix-2.0",
       "@girs/glibunix-2.0",
+      "@girs/gobject-2.0",
+      "@girs/gtk-4.0",
+      "@girs/pango-1.0"
     ]
   }
 }
