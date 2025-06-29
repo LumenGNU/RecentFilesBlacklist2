@@ -1,8 +1,10 @@
 /** @file: src/Ljs/Entry.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.1.0 */
+/** @version: 1.2.0 */
 /**
  * @changelog
+ *
+ * # 1.2.0 - Добавлен SignalsInterface, типизация сигналов
  *
  * # 1.1.0 - Упрощенный вариант позиционирования
  *           контекстного меню
@@ -28,7 +30,7 @@ import {
 } from './Decommissionable.js';
 
 import {
-    GObjectDecorator
+    GDecorator
 } from './GObjectDecorators.js';
 
 import {
@@ -38,6 +40,13 @@ import {
 export type EntryConstructorProps = Omit<Gtk.Entry.ConstructorProps, 'truncate_multiline' | 'truncateMultiline'> & {
     debounce_delay: number;
 };
+
+/** Типы сигналов Entry */
+interface EntrySignalSignatures {
+    'debounced-changed': () => void;
+};
+
+type SignalSignatures = EntrySignalSignatures & Gtk.Entry.SignalSignatures;
 
 /** ## Entry
  *
@@ -99,15 +108,35 @@ export type EntryConstructorProps = Omit<Gtk.Entry.ConstructorProps, 'truncate_m
  * const regular_entry: Gtk.Entry = Entry.new_entry();
  * ~~~
  * */
-@GObjectDecorator.Class({
+@GDecorator.Class({
     GTypeName: 'Ljs-Entry',
     CssName: 'entry',
     Signals: {
+        /** Испускается через debounce_delay мс после последнего изменения текста
+         *
+         * @param self экземпляр Entry, испустивший сигнал */
         'debounced-changed': {}
     },
     GTypeFlags: GObject.TypeFlags.FINAL
 })
 export class Entry extends Gtk.Entry implements IDecommissionable {
+
+    // #region SignalsInterface
+    // ------------------------
+
+    override emit<K extends keyof SignalSignatures>(signal: K, ...args: Parameters<SignalSignatures[K]>): ReturnType<SignalSignatures[K]> {
+        return super.emit(signal, ...args) as ReturnType<SignalSignatures[K]>;
+    }
+
+    override connect<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
+        return super.connect(signal, callback);
+    }
+
+    override connect_after<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
+        return super.connect_after(signal, callback);
+    }
+
+    // #endregion
 
     /** Минимальная задержка для debounced сигнала в миллисекундах
      *
@@ -291,6 +320,9 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
      * @affects this.debounced.changes Будет равен undefined
      * @affects Все внутренние сигналы будут отключены
      * @affects this.decommission Будет равен false
+     *
+     * @fires DelayedSignal#'canceled' Если debounced механизм был активен (не использовался)
+     * @see {@link DelayedSignal.decommission}
      *  */
     public decommission: DecommissionType = () => {
 
@@ -310,16 +342,19 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
     /** Создает новый Entry с расширенной функциональностью.
      *
      * @returns новый экземпляр Entry */
-    static override new(): Entry {
-        return new Entry();
+    static override new(debounce_delay?: number): Entry {
+        return new Entry({
+            debounce_delay: debounce_delay
+        });
     }
 
     /** Создает новый Entry с указанным буфером.
      *
      * @param buffer буфер для Entry
      * @returns новый экземпляр Entry с указанным буфером */
-    static override new_with_buffer(buffer: Gtk.EntryBuffer): Entry {
+    static override new_with_buffer(buffer: Gtk.EntryBuffer, debounce_delay?: number): Entry {
         return new Entry({
+            debounce_delay: debounce_delay,
             buffer: buffer
         });
     }
