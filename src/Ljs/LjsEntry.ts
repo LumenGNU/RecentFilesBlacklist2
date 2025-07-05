@@ -1,8 +1,10 @@
 /** @file: src/Ljs/Entry.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.2.0 */
+/** @version: 1.3.0 */
 /**
  * @changelog
+ *
+ * # 1.3.0 - Фиксы для Gtk.Text вынесены в отдельный модуль
  *
  * # 1.2.0 - Добавлен SignalsInterface, типизация сигналов
  *
@@ -14,7 +16,6 @@
 
 import GObject from 'gi://GObject?version=2.0';
 import Gtk from 'gi://Gtk?version=4.0';
-import Gdk from 'gi://Gdk?version=4.0';
 
 import {
     HandlerID,
@@ -36,6 +37,9 @@ import {
 import {
     DelayedSignal
 } from './DelayedSignal.js';
+import {
+    Text
+} from './Text.js';
 
 export type EntryConstructorProps = Omit<Gtk.Entry.ConstructorProps, 'truncate_multiline' | 'truncateMultiline'> & {
     debounce_delay: number;
@@ -108,8 +112,8 @@ type SignalSignatures = EntrySignalSignatures & Gtk.Entry.SignalSignatures;
  * const regular_entry: Gtk.Entry = Entry.new_entry();
  * ~~~
  * */
-@GDecorator.Class({
-    GTypeName: 'Ljs-Entry',
+@GDecorator.Widget({
+    GTypeName: 'LjsEntry',
     CssName: 'entry',
     Signals: {
         /** Испускается через debounce_delay мс после последнего изменения текста
@@ -119,7 +123,7 @@ type SignalSignatures = EntrySignalSignatures & Gtk.Entry.SignalSignatures;
     },
     GTypeFlags: GObject.TypeFlags.FINAL
 })
-export class Entry extends Gtk.Entry implements IDecommissionable {
+export class LjsEntry extends Gtk.Entry implements IDecommissionable {
 
     // #region SignalsInterface
     // ------------------------
@@ -163,10 +167,12 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
 
         // Принудительно включаем truncate_multiline для предотвращения GTK assertion ошибок
         this.truncate_multiline = true;
-        Entry.fix_entry_context_menu(this);
+
+        // Фикс контекстного меню
+        Text.fix_text_context_menu(this.get_delegate()! as Gtk.Text);
 
         // Настройка debounced сигнала 'debounced-changed'
-        this.debounced.changes = new DelayedSignal(Math.max(debounce_delay ?? 0, Entry.DEFAULT_DELAY));
+        this.debounced.changes = new DelayedSignal(Math.max(debounce_delay ?? 0, LjsEntry.DEFAULT_DELAY));
         this.debounced.handler_id = this.debounced.changes.connect('occurred', this.emit_debounced_changed.bind(this));
 
     }
@@ -230,86 +236,6 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
 
     // #region Fixes
 
-    /** Фикс контекстного меню Entry.
-     *
-     * Решает проблему "broken accounting of active state" в GTK4, что
-     * может приводить к проблемам с контекстным меню виджета. Проблема
-     * возникает при вызове стандартного контекстного меню через правую
-     * кнопку мыши.
-     *
-     * Решение:
-     * 1. Отключать стандартную реакцию на правую кнопку мыши
-     * 2. Добавлять собственный gesture controller для правой кнопки
-     * 3. Вызывать menu.popup action программно
-     * 4. Корректно позиционировать меню
-     *
-     * @param entry Entry для которого применяется фикс */
-    private static fix_entry_context_menu(entry: Gtk.Entry): void {
-
-        // Отключает реакцию на правую кнопку мыши в стандартном gesture controller
-        const controllers = entry.get_delegate()!.observe_controllers();
-        for (let n = 0; n < controllers.get_n_items(); n++) {
-            if (controllers.get_item(n) instanceof Gtk.GestureClick) {
-                if ((controllers.get_item(n) as Gtk.GestureClick).name === 'gtk-text-click-gesture') {
-                    (controllers.get_item(n) as Gtk.GestureClick).set_button(1); // только левая кнопка
-                    break;
-                }
-            }
-        }
-
-        // Добавляем собственный controller для правой кнопки мыши
-        const gesture_controller = new Gtk.GestureClick();
-        gesture_controller.set_button(3);
-        gesture_controller.connect('pressed', (source: Gtk.GestureClick, _n_press: number, x: number, _y: number) => {
-            const text_area = (source.get_widget() as Gtk.Entry).get_delegate()! as Gtk.Text;
-
-            // Вызываем menu.popup action программно (избегаем broken state)
-            // Это практически полностью исключает возникновение проблемы
-            text_area.activate_action('menu.popup', null);
-
-            // То, что происходит в этом цикле направлено на улучшение
-            // UX, и от этого, в принципе, можно отказаться.
-            // Задача этого кода - спозиционировать меню красиво, относительно
-            // курсора мыши. А после закрытия меню, вернуть его в исходное положение
-            // (в начало виджета) для правильного отображения при вызове с клавиатуры.
-            // Находим созданное popover меню...
-            // В gtk контекстное меню поля вводе не статическое, и создается после первого
-            // вызова, и возможно, ?может быть уничтожено? по мере необходимости.
-            let popover = text_area.get_first_child();
-            while (popover) {
-                if (popover instanceof Gtk.PopoverMenu) {
-                    // Скрываем меню на начальной фазе
-                    // Предотвращаем графические артефакты
-                    popover.set_visible(false);
-                    // Сразу перемещаем к курсору
-                    popover.set_offset(x - 32, 0);
-
-                    // Frame clock workaround для корректного позиционирования
-                    const tid = popover.add_tick_callback((popover: Gtk.Widget, _frame_clock: Gdk.FrameClock): boolean => {
-                        popover.set_visible(true);
-                        if (popover instanceof Gtk.PopoverMenu) {
-                            // Сброс offset и отключение tick callback при закрытии меню
-                            const hid = popover.connect('closed', (sender) => {
-                                sender.set_offset(0, 0);
-                                sender.remove_tick_callback(tid);
-                                sender.disconnect(hid);
-                            });
-                        }
-                        return Gdk.EVENT_STOP;
-                    });
-
-                    // Нашли - прерываем цикл
-                    break;
-                }
-                popover = popover.get_next_sibling();
-            }
-        });
-
-        // Подключаем controller
-        // @see {@link https://docs.gtk.org/gtk4/method.Widget.remove_controller.html Widgets will remove all event controllers automatically when they are destroyed}
-        entry.add_controller(gesture_controller);
-    }
-
     // #endregion
 
     /** Деактивация Entry и освобождение ресурсов.
@@ -342,8 +268,8 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
     /** Создает новый Entry с расширенной функциональностью.
      *
      * @returns новый экземпляр Entry */
-    static override new(debounce_delay?: number): Entry {
-        return new Entry({
+    static override new(debounce_delay?: number): LjsEntry {
+        return new LjsEntry({
             debounce_delay: debounce_delay
         });
     }
@@ -352,8 +278,8 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
      *
      * @param buffer буфер для Entry
      * @returns новый экземпляр Entry с указанным буфером */
-    static override new_with_buffer(buffer: Gtk.EntryBuffer, debounce_delay?: number): Entry {
-        return new Entry({
+    static override new_with_buffer(buffer: Gtk.EntryBuffer, debounce_delay?: number): LjsEntry {
+        return new LjsEntry({
             debounce_delay: debounce_delay,
             buffer: buffer
         });
@@ -367,7 +293,7 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
     static new_entry(): Gtk.Entry {
         const entry = Gtk.Entry.new();
         entry.truncate_multiline = true;
-        Entry.fix_entry_context_menu(entry);
+        Text.fix_text_context_menu(entry.get_delegate()! as Gtk.Text);
         return entry;
 
     }
@@ -379,7 +305,7 @@ export class Entry extends Gtk.Entry implements IDecommissionable {
     static new_entry_with_buffer(buffer: Gtk.EntryBuffer): Gtk.Entry {
         const entry = Gtk.Entry.new_with_buffer(buffer);
         entry.truncate_multiline = true;
-        Entry.fix_entry_context_menu(entry);
+        Text.fix_text_context_menu(entry.get_delegate()! as Gtk.Text);
         return entry;
     }
 
