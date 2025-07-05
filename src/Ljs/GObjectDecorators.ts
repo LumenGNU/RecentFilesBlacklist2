@@ -14,6 +14,8 @@
  * # 1.0.0 - Первый вариант
  */
 
+// @fixme Разработчик видит "ошибку CSS парсинга", а не "забыл BaseURI".
+
 /** @module GObjectDecorators.ts
  *
  * GObject декораторы для TypeScript
@@ -26,6 +28,104 @@
  * Декораторы не модифицируют поведение объекта, а лишь упрощают
  * регистрацию его как GObject с дополнительными возможностями. */
 
+/** @todo PERFORMANCE: Рефакторинг импортов GTK (Memory overhead: +25MB vs 4MB baseline)
+ *
+ * ## Проблема:
+ * Модуль импортирует GTK4/Gdk4/Adw на уровне модуля, что добавляет ~25MB памяти
+ * даже для non-GUI GObject классов (сервисы, утилиты).
+ *
+ * ## Импакт:
+ * - Базовое потребление: 4MB
+ * - С декораторами: 29MB (+625% overhead)
+ * - Особенно критично для service-only кода
+ *
+ * ## Решение:
+ * 1. **Динамические импорты** GTK только при необходимости:
+ *    ```typescript
+ *    // Вместо: import Gtk from 'gi://Gtk?version=4.0';
+ *    const { Gtk } = await import('gi://Gtk?version=4.0'); // в apply_styling()
+ *    ```
+ *
+ * 2. **Smart detection**: Проверять нужны ли GTK зависимости:
+ *    ```typescript
+ *    if (meta_info.Template || meta_info.Styling) {
+ *        // Только тогда импортировать GTK
+ *    }
+ *    ```
+ *
+ * 3. **Разделение модуля**:
+ *    - `GObjectDecorators.ts` - базовые декораторы (properties)
+ *    - `GtkDecorators.ts` - UI декораторы (Template, Styling)
+ *
+ * ## Статус:
+ * - Приоритет: LOW (не критично для preferences)
+ * - Когда заняться: после основной функциональности
+ *
+ * ## Связанные проблемы:
+ * - EnumProperty декоратор не работает (см. комментарий @deprecated)
+ *   JS enum'ы != GType enum'ы, нужен JSObjectProperty
+ *
+ * ------
+ *
+ * ## Переключатель gui|no-gui + динамический импорт
+ *
+ * // Один модуль, smart detection
+ * @GDecorator.Class({
+ *     Template: './ui.xml',  // ← Автоматически поймет что нужен GTK
+ *     Styling: { Css: '...' }
+ * })
+ * class MyWidget extends Adw.Window {}
+ *
+ * // vs
+ *
+ * @GDecorator.Class({
+ *     GTypeName: 'MyService' // ← Без GTK зависимостей
+ * })
+ * class MyService extends GObject.Object {}
+ *
+ * ### Отдельные декораторы
+ *
+ * // service/backend код:
+ * import { GDecorator } from './GObjectDecorators';
+ *
+ * @GDecorator.Class()
+ * class MyService extends GObject.Object {}
+ *
+ * // preferences/GUI код:
+ * import { GDecorator } from './GObjectDecorators';
+ * import { GtkDecorator } from './GtkDecorators';
+ *
+ * @GtkDecorator.Class({
+ *     Template: './ui.xml',
+ *     Styling: { Css: '...' }
+ * })
+ * class MyWidget extends Adw.Window {}
+ *
+ * Плюсы:
+ *
+ *     Явное разделение (принцип явности)
+ *     Простая реализация
+ *     Предсказуемый memory footprint
+ *     Легко для tree-shaking
+ *
+ * Минусы:
+ *
+ *     ?Два импорта?
+ *     Нужно помнить что где использовать
+ *
+ * мнение: отдельные декораторы
+ *
+ * логичнее:
+ *
+ *     Четкое разделение есть уже сейчас: service vs preferences
+ *     Explicit лучше implicit для memory-critical кода
+ *     Проще в maintenance - нет условной логики
+ *
+ * src/Ljs/
+ * ├── GObjectDecorators.ts
+*  └── GtkDecorators.ts
+ *
+ */
 
 import GObject from 'gi://GObject';
 import GLib from 'gi://GLib?version=2.0';
@@ -103,7 +203,21 @@ interface GObjectOptions {
 
 type PropertyDecoratorFunction = (target: GObject.Object, property_key: string) => void;
 
-// Реестр CSS providers
+/** CSS провайдеры регистрируются один раз на тип и живут до конца процесса.
+ *
+ * Это сознательное архитектурное решение, консистентное с GObject системой типов:
+ * - GObject типы нельзя отменить после регистрации
+ * - CSS стили привязаны к типу, не к экземпляру
+ * - Каждый процесс изолирован и короткоживущий
+ * - ОС очистит все ресурсы при завершении процесса
+ *
+ * Декоратор регистрирует CssProvider для типа с таким же жизненным циклом (навсегда),
+ * что является не утечкой, а логичным и консистентным поведением. Оно зеркалирует
+ * работу самого GObject.
+ *
+ * get_css_provider() предоставлен для продвинутых случаев ручного управления,
+ * но НЕ требуется для нормальной работы.
+ *  */
 const css_providers_registry = new Map<string, Gtk.CssProvider>();
 
 interface LazyStylingOptions extends StylingOptions {
@@ -227,6 +341,7 @@ export const GDecorator = {
             meta_info.GTypeName ??= `Ljs-${constructor.name}`;
 
             // Проверяем, зарегистрирован ли уже этот тип
+            // @todo: Нужно тестировать! возвращает 0 vs null при отсутствии
             const g_type = GObject.type_from_name(meta_info.GTypeName);
             if (g_type !== null) {
                 throw new Error(`Type ${meta_info.GTypeName} is already registered. Use a different class name.`);
@@ -246,7 +361,7 @@ export const GDecorator = {
                 Properties: (constructor as WithSymbolProps)[properties_symbol] || {}
             };
 
-            const RegisteredClass = GObject.registerClass(config, constructor);
+            const registered_class = GObject.registerClass(config, constructor);
 
             // Если есть стили - оборачиваем в Proxy
             if (Styling) {
@@ -254,7 +369,7 @@ export const GDecorator = {
                 // Добавляем в реестр, стиль будет применен при первом создании объекта
                 lazy_styles.set(meta_info.GTypeName, { ...Styling, BaseURI: BasePath });
 
-                return new Proxy(RegisteredClass, {
+                return new Proxy(registered_class, {
                     construct(target, args) {
                         // Создаем объект обычным способом
                         const instance = Reflect.construct(target, args);
@@ -267,7 +382,7 @@ export const GDecorator = {
                 }) as C;
             }
 
-            return RegisteredClass;
+            return registered_class;
         };
     },
 
@@ -418,6 +533,11 @@ export const GDecorator = {
         };
     },
 
+    /* // @fixme Проблемный декоратор.
+    * Работает только с GType enum'ами из C библиотек, не с JS объектами.
+    * Для JS enum'ов используй JSObjectProperty.
+    *
+    * @todo Разобраться с корректной поддержкой GType enum'ов */
     EnumProperty: function <T>(param: {
         flags?: GObject.ParamFlags,
         enumType: GObject.GType<T> | { $gtype: GObject.GType<T>; },
@@ -590,9 +710,16 @@ function resolve_template_path(template: string, base_uri?: string): string {
         return template;
     }
 
-    try {
+    try { // Резолвим относительный путь
+
+        if (!base_uri) {
+            throw new Error(
+                `Relative path "${template}" requires 'BaseURI' option. Set 'BaseURI' to resolve relative paths.`
+            );
+        }
+
         // получаем базовый каталог_или_файл
-        const base_path = Gio.File.new_for_uri(base_uri ?? import.meta.url);
+        const base_path = Gio.File.new_for_uri(base_uri);
 
         const info = base_path.query_info('standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
 
@@ -649,11 +776,7 @@ function resolve_css_content(styling: LazyStylingOptions): string {
         return new TextDecoder().decode(styling.Css);
     } else {
         // GLib.Bytes
-        const data = styling.Css.get_data();
-        if (data) {
-            return new TextDecoder().decode(data);
-        }
-        return '';
+        return new TextDecoder().decode(styling.Css.toArray());
     }
 }
 
@@ -688,8 +811,15 @@ function resolve_css_file(css: string, base_uri?: string): Gio.File {
     }
 
     try {
+
+        if (!base_uri) {
+            throw new Error(
+                `Relative path "${css}" requires 'BaseURI' option. Set 'BaseURI' to resolve relative paths.`
+            );
+        }
+
         // получаем базовый каталог_или_файл
-        const base_path = Gio.File.new_for_uri(base_uri ?? import.meta.url);
+        const base_path = Gio.File.new_for_uri(base_uri);
 
         const info = base_path.query_info('standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
 
