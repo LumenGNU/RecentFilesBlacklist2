@@ -26,9 +26,29 @@
  * - Стандартных GObject свойств через типизированные декораторы
  *
  * Декораторы не модифицируют поведение объекта, а лишь упрощают
- * регистрацию его как GObject с дополнительными возможностями. */
+ * регистрацию его как GObject с дополнительными возможностями.
+ *
+ * Кому:
+ *
+ *     Разработчикам на GJS, особенно тем, кто пишет сложные UI/desktop
+ *       приложения на JS/TS (Gnome extensions, standalone GTK-приложения).
+ *     Тем, кто хочет писать на TypeScript с типами и удобным
+ *       декларативным стилем, как в Angular или React.
+ *
+ * 2. Чем полезен:
+ *
+ *     Сокращает рутину — меньше boilerplate, декларативное описание
+ *       классов и свойств.
+ *     Явная поддержка CSS/шаблонов — экономит время, снижает вероятность
+ *       ошибок с путями, стилями и шаблонами.
+ *     Улучшает читаемость — код становится похож на современные фреймворки,
+ *       легче поддерживать, легче учить новых людей.
+ *     Безопасность и типизация — благодаря TS-декораторам меньше runtime-ошибок.
+ *     Архитектурная гибкость — можно выбирать: минимальный GObject, только сервисы, или
+ *       с GTK/UI.
+*/
 
-/** @todo PERFORMANCE: Рефакторинг импортов GTK (Memory overhead: +25MB vs 4MB baseline)
+/** // @todo PERFORMANCE: Рефакторинг импортов GTK (Memory overhead: +25MB vs 4MB baseline)
  *
  * ## Проблема:
  * Модуль импортирует GTK4/Gdk4/Adw на уровне модуля, что добавляет ~25MB памяти
@@ -70,7 +90,7 @@
  * ## Переключатель gui|no-gui + динамический импорт
  *
  * // Один модуль, smart detection
- * @GDecorator.Class({
+ * @GDecorator.Widget({
  *     Template: './ui.xml',  // ← Автоматически поймет что нужен GTK
  *     Styling: { Css: '...' }
  * })
@@ -78,7 +98,7 @@
  *
  * // vs
  *
- * @GDecorator.Class({
+ * @GDecorator.Widget({
  *     GTypeName: 'MyService' // ← Без GTK зависимостей
  * })
  * class MyService extends GObject.Object {}
@@ -88,7 +108,7 @@
  * // service/backend код:
  * import { GDecorator } from './GObjectDecorators';
  *
- * @GDecorator.Class()
+ * @GDecorator.Widget()
  * class MyService extends GObject.Object {}
  *
  * // preferences/GUI код:
@@ -186,7 +206,7 @@ interface StylingOptions {
     Priority?: StylePriority;
 }
 
-interface GObjectOptions {
+interface WidgetOptions {
     GTypeName?: string,
     GTypeFlags?: GObject.TypeFlags,
     Signals?: GSignals,
@@ -195,7 +215,7 @@ interface GObjectOptions {
     Template?: Uint8Array | GLib.Bytes | string,
     Children?: string[],
     InternalChildren?: string[],
-    Requires?: GObject.Object[],
+    Requires?: any[],
     Styling?: StylingOptions,
     BaseURI?: string,
 };
@@ -293,7 +313,7 @@ export const GDecorator = {
      *
      * @example UI и стили
      * ```typescript
-     * @GDecorator.Class({
+     * @GDecorator.Widget({
      *     GTypeName: 'MyWidget',
      *     Template: './my-widget.ui',
      *     Styling: {
@@ -308,7 +328,7 @@ export const GDecorator = {
      *
      * @example UI и стили (резолвинг относительно текущего файла)
      * ```typescript
-     * @GDecorator.Class({
+     * @GDecorator.Widget({
      *     BaseURI: import.meta.url,
      *     Template: './templates/dialog.ui',
      *     Styling: { Css: './styles/dialog.css' },
@@ -322,7 +342,7 @@ export const GDecorator = {
      *
      * @example Inline UI и стили
      * ```typescript
-     * @GDecorator.Class({
+     * @GDecorator.Widget({
      *     Template: `<interface><template class="MyWidget" parent="GtkBox">
      *                  <child><object class="GtkLabel" id="label"/></child>
      *                </template></interface>`,
@@ -335,20 +355,23 @@ export const GDecorator = {
      *     declare _label: Gtk.Label;
      * }
      *  */
-    Class: function (meta_info: GObjectOptions = {}) {
+    Widget: function (meta_info: WidgetOptions = {}) {
+
+        // @todo: почему не здесь?
+
         return function <C extends GObject.ObjectConstructor>(constructor: C): C {
 
             meta_info.GTypeName ??= `Ljs-${constructor.name}`;
 
             // Проверяем, зарегистрирован ли уже этот тип
-            // @todo: Нужно тестировать! возвращает 0 vs null при отсутствии
+            // @note: в js возвращает null при отсутствии
             const g_type = GObject.type_from_name(meta_info.GTypeName);
             if (g_type !== null) {
                 throw new Error(`Type ${meta_info.GTypeName} is already registered. Use a different class name.`);
             }
 
             // Извлекаем Styling и BasePath перед регистрацией
-            const { Styling, BaseURI: BasePath, ...gobject_meta } = meta_info;
+            const { Styling, BaseURI: BasePath, Requires, ...gobject_meta } = meta_info;
 
             // Обрабатываем Template если есть
             if (gobject_meta.Template && typeof gobject_meta.Template === 'string') {
@@ -358,6 +381,7 @@ export const GDecorator = {
             // Собираем свойства из декораторов
             const config: GObject.MetaInfo<GProps, GInterfaces, GSignals> = {
                 ...gobject_meta,
+                Requires,
                 Properties: (constructor as WithSymbolProps)[properties_symbol] || {}
             };
 
@@ -369,12 +393,18 @@ export const GDecorator = {
                 // Добавляем в реестр, стиль будет применен при первом создании объекта
                 lazy_styles.set(meta_info.GTypeName, { ...Styling, BaseURI: BasePath });
 
-                return new Proxy(registered_class, {
+                return new Proxy(constructor /*registered_class*/, {
                     construct(target, args) {
                         // Создаем объект обычным способом
                         const instance = Reflect.construct(target, args);
 
                         // После создания применяем стили
+                        const requires_names = meta_info.Requires?.map((cls)=>cls.$gtype.name);
+                        if(requires_names) {
+                            requires_names.forEach((type_name) => {
+                                ensure_styles_applied(type_name);
+                            })
+                        }
                         ensure_styles_applied(meta_info.GTypeName!);
 
                         return instance;
@@ -382,9 +412,13 @@ export const GDecorator = {
                 }) as C;
             }
 
+
+
             return registered_class;
         };
     },
+
+    // #region *Property Декораторы
 
     /** @deprecated
      *
@@ -537,7 +571,7 @@ export const GDecorator = {
     * Работает только с GType enum'ами из C библиотек, не с JS объектами.
     * Для JS enum'ов используй JSObjectProperty.
     *
-    * @todo Разобраться с корректной поддержкой GType enum'ов */
+    * // @todo Разобраться с корректной поддержкой GType enum'ов */
     EnumProperty: function <T>(param: {
         flags?: GObject.ParamFlags,
         enumType: GObject.GType<T> | { $gtype: GObject.GType<T>; },
@@ -657,7 +691,35 @@ export const GDecorator = {
         };
     },
 
+    // #endregion
+
 };
+
+/** Получает CSS provider для типа зарегистрированного через декоратор
+ *
+ * Позволяет получить доступ к CSS provider'у для ручного управления стилями,
+ * например для удаления стилей или модификации приоритета.
+ *
+ * @param type_name Имя типа GObject (GTypeName, используемый при регистрации)
+ * @returns CSS provider или undefined если стили не были применены для данного типа
+ *
+ * @example
+ * ```typescript
+ * // Получаем provider для ручного cleanup
+ * const provider = get_css_provider('Ljs-MyWidget');
+ * if (provider) {
+ *     Gtk.StyleContext.remove_provider_for_display(
+ *         Gdk.Display.get_default()!,
+ *         provider
+ *     );
+ * }
+ * ```
+ */
+export function get_css_provider(type_name: string): Gtk.CssProvider | undefined {
+    return css_providers_registry.get(type_name);
+}
+
+// #region Приватные функции
 
 function ensure_properties_storage(target: GObject.Object, property_key: string): GProps {
     const constructor = target.constructor as WithSymbolProps; // as GObjectConstructor;
@@ -855,26 +917,4 @@ function ensure_styles_applied(type_name: string): void {
     }
 }
 
-/** Получает CSS provider для типа зарегистрированного через декоратор
- *
- * Позволяет получить доступ к CSS provider'у для ручного управления стилями,
- * например для удаления стилей или модификации приоритета.
- *
- * @param type_name Имя типа GObject (GTypeName, используемый при регистрации)
- * @returns CSS provider или undefined если стили не были применены для данного типа
- *
- * @example
- * ```typescript
- * // Получаем provider для ручного cleanup
- * const provider = get_css_provider('Ljs-MyWidget');
- * if (provider) {
- *     Gtk.StyleContext.remove_provider_for_display(
- *         Gdk.Display.get_default()!,
- *         provider
- *     );
- * }
- * ```
- */
-export function get_css_provider(type_name: string): Gtk.CssProvider | undefined {
-    return css_providers_registry.get(type_name);
-}
+// #endregion
