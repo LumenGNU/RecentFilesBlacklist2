@@ -1,8 +1,13 @@
 /** @file: src/Ljs/GObjectDecorators.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.2.0 */
+/** @version: 1.5.0 */
 /**
  * @changelog
+ *
+ * # 1.5.1 - StyleLayersManager вынесен в отдельный модуль
+ *
+ * # 1.5.0 - TypeScript-based GObject UI DSL
+ *         - Стили применяются глобально через Gdk.DisplayManager
  *
  * # 1.2.0 - meta_info.Styling - можно указать css
  *           стили через декоратор
@@ -13,8 +18,6 @@
  *
  * # 1.0.0 - Первый вариант
  */
-
-// @fixme Разработчик видит "ошибку CSS парсинга", а не "забыл BaseURI".
 
 /** @module GObjectDecorators.ts
  *
@@ -98,7 +101,7 @@
  *
  * // vs
  *
- * @GDecorator.Widget({
+ * @GDecorator.GObject({
  *     GTypeName: 'MyService' // ← Без GTK зависимостей
  * })
  * class MyService extends GObject.Object {}
@@ -141,9 +144,6 @@
  *     Explicit лучше implicit для memory-critical кода
  *     Проще в maintenance - нет условной логики
  *
- * src/Ljs/
- * ├── GObjectDecorators.ts
-*  └── GtkDecorators.ts
  *
  */
 
@@ -151,7 +151,16 @@ import GObject from 'gi://GObject';
 import GLib from 'gi://GLib?version=2.0';
 import Gio from 'gi://Gio?version=2.0';
 import Gtk from 'gi://Gtk?version=4.0';
-import Gdk from 'gi://Gdk?version=4.0';
+
+import {
+    CssParseError,
+    get_style_layers_manager
+} from './StyleLayersManager.js';
+
+export {
+    StylePriority,
+    get_style_layers_manager
+ } from './StyleLayersManager.js';
 
 /** GObject-свойства */
 type GProps = Record<string, GObject.ParamSpec>;
@@ -176,35 +185,7 @@ interface WithSymbolProps {
     [properties_symbol]?: GProps;
 }
 
-/** Приоритеты CSS стилей для StyleContext
- *
- * Определяет порядок применения CSS правил. Чем выше числовое значение приоритета,
- * тем позже правила применяются и тем больше вероятность что они переопределят
- * предыдущие правила с более низким приоритетом.
- *
- * от GTK_STYLE_PROVIDER_PRIORITY_USER.
- * до GTK_STYLE_PROVIDER_PRIORITY_FALLBACK
- *
- * @see {@link https://docs.gtk.org/gtk4/type_func.StyleContext.add_provider_for_display.html Gtk.StyleContext.add_provider_for_display}
- * */
-export enum StylePriority {
-    USER = Gtk.STYLE_PROVIDER_PRIORITY_USER, // 800
-    APPLICATION = Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION, // 600
-    SETTINGS = Gtk.STYLE_PROVIDER_PRIORITY_SETTINGS, // 400
-    THEME = Gtk.STYLE_PROVIDER_PRIORITY_THEME, // 200
-    FALLBACK = Gtk.STYLE_PROVIDER_PRIORITY_FALLBACK, // 1
-}
-
-/** Настройки CSS стилей для GObject класса
- *
- * Определяет CSS стили и параметры их применения для виджета.
- * Стили применяются глобально при первом создании экземпляра класса. */
-interface StylingOptions {
-    /** CSS стили - css-строка или URI к стилям */
-    Css: Uint8Array | GLib.Bytes | string;
-    /** Приоритет применения стилей */
-    Priority?: StylePriority;
-}
+type StylingOptions = Record<number, GLib.Bytes | Uint8Array | Gio.File | string>;
 
 interface WidgetOptions {
     GTypeName?: string,
@@ -214,38 +195,21 @@ interface WidgetOptions {
     CssName?: string,
     Template?: Uint8Array | GLib.Bytes | string,
     Children?: string[],
-    InternalChildren?: string[],
-    Requires?: any[],
+    Requires?: Gtk.WidgetClass[],
+
+    /** Настройки CSS стилей для LjsWidget класса
+     *
+     * Определяет CSS стили для виджета с соответствующим приоритетами.
+     * Стили применяются глобально при регистрации типа.
+     *
+     * @see {@link StylePriority}
+     *
+     * // @todo
+     * */
     Styling?: StylingOptions,
-    BaseURI?: string,
 };
 
-
 type PropertyDecoratorFunction = (target: GObject.Object, property_key: string) => void;
-
-/** CSS провайдеры регистрируются один раз на тип и живут до конца процесса.
- *
- * Это сознательное архитектурное решение, консистентное с GObject системой типов:
- * - GObject типы нельзя отменить после регистрации
- * - CSS стили привязаны к типу, не к экземпляру
- * - Каждый процесс изолирован и короткоживущий
- * - ОС очистит все ресурсы при завершении процесса
- *
- * Декоратор регистрирует CssProvider для типа с таким же жизненным циклом (навсегда),
- * что является не утечкой, а логичным и консистентным поведением. Оно зеркалирует
- * работу самого GObject.
- *
- * get_css_provider() предоставлен для продвинутых случаев ручного управления,
- * но НЕ требуется для нормальной работы.
- *  */
-const css_providers_registry = new Map<string, Gtk.CssProvider>();
-
-interface LazyStylingOptions extends StylingOptions {
-    BaseURI?: string;
-}
-
-// Реестр отложенных стилей
-const lazy_styles = new Map<string, LazyStylingOptions>();
 
 const properties_symbol = Symbol('gobject_properties');
 
@@ -278,7 +242,7 @@ export const GDecorator = {
      * @param meta_info.Styling Объект с CSS стилями:
      *                          - Css: CSS код или путь к файлу. Путь может быть относительным
      *                          - Priority: приоритет применения (StylePriority enum)
-     *                          Стили применяются глобально при **первом создании** экземпляра класса
+     *                          Стили применяются глобально при регистрации типа
      * @param meta_info.Children Имена дочерних элементов
      * @param meta_info.InternalChildren Имена внутренних дочерних элементов
      * @param meta_info.Requires Требуемые зависимости
@@ -356,63 +320,42 @@ export const GDecorator = {
      * }
      *  */
     Widget: function (meta_info: WidgetOptions = {}) {
-
-        // @todo: почему не здесь?
-
         return function <C extends GObject.ObjectConstructor>(constructor: C): C {
 
-            meta_info.GTypeName ??= `Ljs-${constructor.name}`;
+            meta_info.GTypeName ??= `Ljs${constructor.name}`;
 
-            // Проверяем, зарегистрирован ли уже этот тип
-            // @note: в js возвращает null при отсутствии
+            // Проверка на дубликат типа
             const g_type = GObject.type_from_name(meta_info.GTypeName);
             if (g_type !== null) {
                 throw new Error(`Type ${meta_info.GTypeName} is already registered. Use a different class name.`);
             }
 
-            // Извлекаем Styling и BasePath перед регистрацией
-            const { Styling, BaseURI: BasePath, Requires, ...gobject_meta } = meta_info;
+            // Извлекаем части которые не передаем в registerClass
+            const { Styling, ...gobject_meta } = meta_info;
 
-            // Обрабатываем Template если есть
-            if (gobject_meta.Template && typeof gobject_meta.Template === 'string') {
-                gobject_meta.Template = resolve_template_path(gobject_meta.Template, BasePath);
-            }
-
-            // Собираем свойства из декораторов
-            const config: GObject.MetaInfo<GProps, GInterfaces, GSignals> = {
+            // Регистрируем GObject тип
+            const config = {
                 ...gobject_meta,
-                Requires,
                 Properties: (constructor as WithSymbolProps)[properties_symbol] || {}
             };
 
-            const registered_class = GObject.registerClass(config, constructor);
+            const registered_class = GObject.registerClass(config as any, constructor);
 
-            // Если есть стили - оборачиваем в Proxy
+            // Применяем стили через StyleLayerManager
             if (Styling) {
 
-                // Добавляем в реестр, стиль будет применен при первом создании объекта
-                lazy_styles.set(meta_info.GTypeName, { ...Styling, BaseURI: BasePath });
+                for (const key in Styling) {
+                    const priority = parseInt(key, 10);
+                    get_style_layers_manager()
+                        .then(manager => manager.append_layer(meta_info.GTypeName!, priority, Styling[priority]))
+                        .catch((error) => {
+                            if (error instanceof CssParseError) {
+                                console.error(error.message, error.cause ? `\nWith cause:\n${error.cause}` : '');
+                            }
+                        });
+                }
 
-                return new Proxy(constructor /*registered_class*/, {
-                    construct(target, args) {
-                        // Создаем объект обычным способом
-                        const instance = Reflect.construct(target, args);
-
-                        // После создания применяем стили
-                        const requires_names = meta_info.Requires?.map((cls)=>cls.$gtype.name);
-                        if(requires_names) {
-                            requires_names.forEach((type_name) => {
-                                ensure_styles_applied(type_name);
-                            })
-                        }
-                        ensure_styles_applied(meta_info.GTypeName!);
-
-                        return instance;
-                    }
-                }) as C;
             }
-
-
 
             return registered_class;
         };
@@ -695,29 +638,7 @@ export const GDecorator = {
 
 };
 
-/** Получает CSS provider для типа зарегистрированного через декоратор
- *
- * Позволяет получить доступ к CSS provider'у для ручного управления стилями,
- * например для удаления стилей или модификации приоритета.
- *
- * @param type_name Имя типа GObject (GTypeName, используемый при регистрации)
- * @returns CSS provider или undefined если стили не были применены для данного типа
- *
- * @example
- * ```typescript
- * // Получаем provider для ручного cleanup
- * const provider = get_css_provider('Ljs-MyWidget');
- * if (provider) {
- *     Gtk.StyleContext.remove_provider_for_display(
- *         Gdk.Display.get_default()!,
- *         provider
- *     );
- * }
- * ```
- */
-export function get_css_provider(type_name: string): Gtk.CssProvider | undefined {
-    return css_providers_registry.get(type_name);
-}
+
 
 // #region Приватные функции
 
@@ -747,7 +668,7 @@ function prepare_property_spec(target: GObject.Object, property_key: string): [g
 }
 
 // export { identifier_to_nickname }; // для тестов
-/** Преобразует JS идентификатор в читаемый ник
+/** Преобразует JS идентификатор в читаемый ник (для маленьких и ленивых)
  * @param identifier JS идентификатор (camelCase, snake_case или смешанный)
  * @returns Читаемая строка с Капитализированными Словами */
 function identifier_to_nickname(identifier: string): string {
@@ -763,158 +684,6 @@ function identifier_to_nickname(identifier: string): string {
     return words
         .map(word => word.charAt(0).toUpperCase() + word.slice(1))
         .join(' ');
-}
-
-/** Преобразует относительный путь к UI template в абсолютный file:// URI */
-function resolve_template_path(template: string, base_uri?: string): string {
-    // Если не начинается с точки - возвращаем как есть
-    if (!template.startsWith('.')) {
-        return template;
-    }
-
-    try { // Резолвим относительный путь
-
-        if (!base_uri) {
-            throw new Error(
-                `Relative path "${template}" requires 'BaseURI' option. Set 'BaseURI' to resolve relative paths.`
-            );
-        }
-
-        // получаем базовый каталог_или_файл
-        const base_path = Gio.File.new_for_uri(base_uri);
-
-        const info = base_path.query_info('standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
-
-        const base_dir = (info.get_file_type() === Gio.FileType.DIRECTORY) ? base_path : base_path.get_parent()!;
-
-        // Резолвим относительный путь
-        const resolved_file = base_dir.resolve_relative_path(template);
-
-        if (!resolved_file) {
-            throw new Error('Failed to resolve relative path');
-        }
-        return resolved_file.get_uri();
-
-    } catch (error) {
-        throw new Error(`Failed to resolve template path "${template}": ${(error as Error).message}`);
-    }
-}
-
-/** Применяет CSS стили глобально */
-function apply_styling(styling: LazyStylingOptions, type_name: string): void {
-    try {
-        // Резолвим CSS контент
-        const css_content = resolve_css_content(styling);
-
-        // Создаем CSS provider
-        const css_provider = new Gtk.CssProvider();
-        css_provider.load_from_string(css_content);
-
-        // Получаем display
-        const display = Gdk.Display.get_default(); // Adw.StyleManager.get_default().get_display(); //
-        if (!display) {
-            throw new Error('No default display available for CSS styling');
-        }
-
-        // Применяем стили глобально
-        const priority = styling.Priority ?? StylePriority.APPLICATION;
-        Gtk.StyleContext.add_provider_for_display(display, css_provider, priority);
-
-        // Сохраняем в реестр
-        css_providers_registry.set(type_name, css_provider);
-
-    } catch (error) {
-        throw new Error(`Failed to apply styling for ${type_name}: ${(error as Error).message}`);
-    }
-}
-
-/** Резолвит CSS контент из строки, URI или binary данных */
-function resolve_css_content(styling: LazyStylingOptions): string {
-    if (typeof styling.Css === 'string') {
-        // Строка - либо CSS код, либо путь
-        return resolve_css_string(styling);
-    } else if (styling.Css instanceof Uint8Array) {
-        // Декодируем binary данные
-        return new TextDecoder().decode(styling.Css);
-    } else {
-        // GLib.Bytes
-        return new TextDecoder().decode(styling.Css.toArray());
-    }
-}
-
-/** Резолвит CSS из строки - загружает файл если существует, иначе CSS код */
-function resolve_css_string(styling: LazyStylingOptions): string {
-    try {
-        const file = resolve_css_file(styling.Css as string, styling.BaseURI);
-
-        // Если файл существует - обязательно загружаем
-        if (file.query_exists(null)) {
-            const [success, contents] = file.load_contents(null);
-            if (!success) {
-                throw new Error(`File exists but failed to read contents: ${file.get_path()}`);
-            }
-            return new TextDecoder().decode(contents);
-        }
-
-        // Файл не существует - считаем CSS кодом
-        return styling.Css as string;
-
-    } catch (error) {
-        // Ошибка при резолвинге пути - считаем CSS кодом
-        return styling.Css as string;
-    }
-}
-
-function resolve_css_file(css: string, base_uri?: string): Gio.File {
-
-    // Если не начинается с точки - возвращаем как есть
-    if (!css.startsWith('.')) {
-        return Gio.File.new_for_uri(css);
-    }
-
-    try {
-
-        if (!base_uri) {
-            throw new Error(
-                `Relative path "${css}" requires 'BaseURI' option. Set 'BaseURI' to resolve relative paths.`
-            );
-        }
-
-        // получаем базовый каталог_или_файл
-        const base_path = Gio.File.new_for_uri(base_uri);
-
-        const info = base_path.query_info('standard::type', Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, null);
-
-        const base_dir = (info.get_file_type() === Gio.FileType.DIRECTORY) ? base_path : base_path.get_parent()!;
-
-        // Резолвим относительный путь
-        const resolved_file = base_dir.resolve_relative_path(css);
-
-        if (!resolved_file) {
-            throw new Error('Failed to resolve relative path');
-        }
-        return resolved_file;
-
-    } catch (error) {
-        throw new Error(`Failed to resolve CSS file path "${css}": ${(error as Error).message}`);
-    }
-}
-
-/** Применяет отложенные стили если дисплей готов */
-function ensure_styles_applied(type_name: string): void {
-
-    const styling = lazy_styles.get(type_name);
-
-    if (!styling || css_providers_registry.has(type_name)) {
-        return; // Стили уже применены или их нет
-    }
-
-    try {
-        apply_styling(styling, type_name);
-        lazy_styles.delete(type_name);
-    } catch (error) {
-        throw error;
-    }
 }
 
 // #endregion
