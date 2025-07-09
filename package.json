@@ -61,6 +61,10 @@
                         {
                             "type": "file",
                             "name": "tsconfig_for"
+                        },
+                        {
+                            "type": "file",
+                            "name": "update_project_structure"
                         }
                     ]
                 },
@@ -68,11 +72,6 @@
                     "type": "file",
                     "name": "eslint.config.js",
                     "info": "ESLint configuration file"
-                },
-                {
-                    "type": "file",
-                    "name": ".info",
-                    "info": "Project Files description"
                 },
                 {
                     "type": "file",
@@ -111,11 +110,15 @@
                             "contents": [
                                 {
                                     "type": "file",
-                                    "name": "Client.Clod.ts"
+                                    "name": "Client.Claude.ts"
                                 },
                                 {
                                     "type": "file",
                                     "name": "RecentFilesClient.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "RecentInfoPanel.ts"
                                 },
                                 {
                                     "type": "file",
@@ -166,11 +169,6 @@
                                 },
                                 {
                                     "type": "file",
-                                    "name": "Entry.ts",
-                                    "info": "Класс Gtk.Entry с расширенной функциональностью"
-                                },
-                                {
-                                    "type": "file",
                                     "name": "GObjectDecorators.ts",
                                     "info": "GObject декораторы для TypeScript"
                                 },
@@ -181,8 +179,16 @@
                                 },
                                 {
                                     "type": "file",
+                                    "name": "LjsEntry.ts"
+                                },
+                                {
+                                    "type": "file",
                                     "name": "Logger.ts",
                                     "info": "Классы, реализующие логирование в GJS"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "Text.ts"
                                 }
                             ]
                         },
@@ -272,7 +278,23 @@
                                 },
                                 {
                                     "type": "file",
+                                    "name": "test-import-meta.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "TestWindow.DecoratorWithCss.ts"
+                                },
+                                {
+                                    "type": "file",
                                     "name": "TestWindow.test.ts"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "test-window.ui"
+                                },
+                                {
+                                    "type": "file",
+                                    "name": "TestWindow.xml.test.ts"
                                 }
                             ]
                         }
@@ -300,7 +322,7 @@
         {
             "type": "report",
             "directories": 11,
-            "files": 42
+            "files": 48
         }
     ],
     "devDependencies": {
