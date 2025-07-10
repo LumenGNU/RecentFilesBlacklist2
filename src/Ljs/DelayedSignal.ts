@@ -83,7 +83,7 @@ type SignalSignatures = DelayedSignalSignatures & GObject.Object.SignalSignature
  * // через 300мс → 'occurred'
  * ~~~
  */
-@GDecorator.Class({
+@GDecorator.Widget({
     GTypeName: 'DelayedSignal',
     Signals: {
 
@@ -114,17 +114,11 @@ export class DelayedSignal extends GObject.Object implements IDecommissionable {
     // #region SignalsInterface
     // ------------------------
 
-    override emit<K extends keyof SignalSignatures>(signal: K, ...args: Parameters<SignalSignatures[K]>): ReturnType<SignalSignatures[K]> {
-        return super.emit(signal, ...args) as ReturnType<SignalSignatures[K]>;
-    }
 
-    override connect<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
-        return super.connect(signal, callback);
-    }
-
-    override connect_after<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
-        return super.connect_after(signal, callback);
-    }
+    /** @see {@link SignalSignatures} */
+    declare emit: <K extends keyof SignalSignatures>(signal: K, ...args: Parameters<SignalSignatures[K]>) => ReturnType<SignalSignatures[K]>;
+    declare connect: <K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>) => number;
+    declare connect_after: <K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>) => number;
 
     // #endregion
 
