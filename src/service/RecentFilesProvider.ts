@@ -45,22 +45,25 @@ import GLib from 'gi://GLib?version=2.0';
 import Gtk from 'gi://Gtk?version=4.0';
 import {
     HandlerID,
-    PromiseControllers
-} from '../shared/common-types.js';
+    PromiseController
+} from '../Ljs/common-types.js';
 import {
     NO_HANDLER
-} from '../shared/common-types.js';
+} from '../Ljs/common-types.js';
 import {
-    Decommissionable,
+    IDecommissionable,
     DecommissionedError,
-    decommission_signals
-} from '../shared/Decommissionable.interface.js';
+    decommission_signals,
+    DECOMMISSIONED,
+    DecommissionType
+} from '../Ljs/Decommissionable.js';
 import {
-    DelayedSignal
-} from '../shared/DelayedSignal.js';
+    DelayedSignal,
+    SignalPropagate
+} from '../Ljs/DelayedSignal.js';
 import {
-    GObjectDecorator
-} from '../shared/gobject-decorators.js';
+    GDecorator
+} from '../Ljs/GObjectDecorators.js';
 
 
 /** Состояния мониторинга истории файлов. */
@@ -414,7 +417,7 @@ export class DuplicateUriError extends Error {
  * - Нет прямого контроля над сортировкой (определяется поведением `Gtk.RecentManager`)
  * - Нет фильтрации на уровне провайдера (нужно фильтровать результат)
  *  */
-@GObjectDecorator.Class({
+@GDecorator.Widget({
     GTypeName: 'RecentFilesProvider',
     GTypeFlags: GObject.TypeFlags.FINAL,
     Signals: {
@@ -422,7 +425,7 @@ export class DuplicateUriError extends Error {
         'history-changes-settled': {}
     },
 })
-export class RecentFilesProvider extends GObject.Object implements Decommissionable {
+export class RecentFilesProvider extends GObject.Object implements IDecommissionable {
 
     /** Минимальное значения для таймаута дебаунса сигнала `'history-changes-settled'` */
     static DEBOUNCE_TIMEOUT = 330 as const;
@@ -440,8 +443,8 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         /** Источник процесса обработки очереди удаления */
         source: undefined as GLib.Source | undefined,
         /** Очередь промисов для удаления */
-        remove_queue: new Map<string, PromiseControllers<void>>(),
-        promise_controllers: undefined as PromiseControllers<void> | undefined,
+        remove_queue: new Map<string, PromiseController<void>>(),
+        promise_controllers: undefined as PromiseController<void> | undefined,
     };
 
     /** ID обработчиков */
@@ -526,7 +529,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * При изменении этой настройки автоматически генерируется уведомление
      * и может измениться состояние мониторинга.
      * */
-    @GObjectDecorator.BooleanProperty({
+    @GDecorator.BooleanProperty({
         flags: GObject.ParamFlags.READABLE, default_value: false
     })
     public get recent_files_enabled(): boolean {
@@ -538,7 +541,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
     }
 
     /** Путь к файлу-истории */
-    @GObjectDecorator.StringProperty({
+    @GDecorator.StringProperty({
         flags: GObject.ParamFlags.READABLE
     })
     public get history_file_path(): string {
@@ -550,7 +553,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
     }
 
     /** Количество записей в истории */
-    @GObjectDecorator.UIntProperty({
+    @GDecorator.UIntProperty({
         flags: GObject.ParamFlags.READABLE,
         minimum: 0,
         maximum: GLib.MAXUINT32,
@@ -566,7 +569,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
     /** Состояние мониторинга.
      *
      * Вычислимое свойство state */
-    @GObjectDecorator.UIntProperty({
+    @GDecorator.UIntProperty({
         flags: GObject.ParamFlags.READABLE,
         minimum: MonitoringState.INACTIVE,
         maximum: MonitoringState.ACTIVE,
@@ -831,9 +834,11 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      *
      * @fires notify::history-items-count
      * @fires history-changes-settled */
-    private history_changed_cb(): void {
+    private history_changed_cb(): boolean {
         this.notify('history-items-count'); // уведомление о возможном изменении размера истории
         this.emit('history-changes-settled'); // сигнал 'history-changes-settled'
+
+        return SignalPropagate.STOP;
     };
 
     //#endregion
@@ -992,7 +997,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
      * 3. Отключение всех обработчиков сигналов
      * 4. Намеренную "порчу" объекта для предотвращения дальнейшего использования
      */
-    public decommission(): void {
+    public decommission: DecommissionType = () => {
         // Метод намеренно 'разрушает' объект для немедленного
         // выявления неправильного использования.
         // Небезопасная типизация сделана намеренно.
@@ -1001,9 +1006,12 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         decommission_signals(this, this.state_context.handler_id);
         decommission_signals(this.default_settings_manager!, this.handlers_ids.settings_manager);
         decommission_signals(this.default_recent_manager, this.handlers_ids.recent_manager);
-        decommission_signals(this.delayed_signal.emitter, this.delayed_signal.handler_id);
 
-        this.delayed_signal.emitter.cancel();
+        this.delayed_signal.emitter.disconnectAll();
+
+        if (this.delayed_signal.emitter.decommission) {
+            this.delayed_signal.emitter.decommission();
+        }
 
         // остановка возможного процесса удаления
         if (this.remove_process_context.source) {
@@ -1022,7 +1030,7 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         this.withdraw_monitoring = (throw_decommissioned as typeof this.withdraw_monitoring);
         this.remove_item = (throw_decommissioned as typeof this.remove_item);
         this.get_items = (throw_decommissioned as typeof this.get_items);
-        this.decommission = (throw_decommissioned as typeof this.decommission);
+
 
         this.state_context.handler_id = (undefined as unknown as typeof this.state_context.handler_id);
         this.state_context = (undefined as unknown as typeof this.state_context);
@@ -1043,7 +1051,8 @@ export class RecentFilesProvider extends GObject.Object implements Decommissiona
         this.remove_process_context.source = undefined;
         this.remove_process_context = (undefined as unknown as typeof this.remove_process_context);
 
-    }
+        this.decommission = DECOMMISSIONED;
+    };
 
 
 
