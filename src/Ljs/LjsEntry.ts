@@ -1,6 +1,6 @@
 /** @file: src/Ljs/Entry.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version: 1.3.0 */
+/** @version: 1.3.1 */
 /**
  * @changelog
  *
@@ -19,8 +19,8 @@ import Gtk from 'gi://Gtk?version=4.0';
 
 import {
     HandlerID,
-    NO_HANDLER
-} from '../shared/common-types.js';
+    NO_HANDLER,
+} from './common-types.js';
 
 import {
     IDecommissionable,
@@ -40,6 +40,10 @@ import {
 import {
     Text
 } from './Text.js';
+
+import {
+SignalPropagate
+} from './ISignals.js';
 
 export type EntryConstructorProps = Omit<Gtk.Entry.ConstructorProps, 'truncate_multiline' | 'truncateMultiline'> & {
     debounce_delay: number;
@@ -232,6 +236,7 @@ export class LjsEntry extends Gtk.Entry implements IDecommissionable {
     /** Внутренний метод для испускания `'debounced-changed'` сигнала. */
     private emit_debounced_changed() {
         this.emit('debounced-changed');
+        return SignalPropagate.STOP;
     }
 
     // #region Fixes
@@ -256,7 +261,7 @@ export class LjsEntry extends Gtk.Entry implements IDecommissionable {
             this.debounced.changes.decommission();
         }
 
-        decommission_signals(this.debounced.changes, this.debounced.handler_id);
+        this.debounced.changes.disconnectAll();
 
         this.debounced.changes = undefined as unknown as typeof this.debounced.changes;
 
