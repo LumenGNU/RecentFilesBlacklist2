@@ -1,8 +1,11 @@
 /** @file: src/Ljs/DelayedSignal.ts */
 /** @license: https://www.gnu.org/licenses/gpl.txt */
-/** @version:  2.2.0 */
+/** @version:  2.3.0 */
 /**
  * @changelog
+ *
+ * # 2.3.0 - imports.signals.addSignalMethods вместо
+ *           наследования от GObject
  *
  * # 2.2.0 - Добавлен SignalsInterface, типизация сигналов
  *
@@ -15,12 +18,7 @@
  *
  *  */
 
-import GObject from 'gi://GObject';
 import GLib from 'gi://GLib?version=2.0';
-
-import {
-    GDecorator
-} from './GObjectDecorators.js';
 
 import {
     IDecommissionable,
@@ -29,13 +27,40 @@ import {
     DecommissionedError
 } from './Decommissionable.js';
 
+import {
+    register_signals_for_prototype,
+    ISignals
+} from './ISignals.js';
+
+export {
+    SignalPropagate
+} from './ISignals.js';
+
 interface DelayedSignalSignatures {
-    'scheduled': () => void;
-    'occurred': () => void;
-    'canceled': () => void;
+    /** Сигнал, эмитируемый при первом планировании отложенной эмиссии.
+     * При перепланировании (сброс уже активного таймера) этот сигнал НЕ эмиттируется.
+     *
+     * Т.е. он всегда перед сигналом 'occurred', если тот еще не выбрасывался,
+     * или если после последнего выброса 'occurred' прошло больше `debounce_interval`,
+     * и планируется новый выброс 'occurred'.
+     *
+     * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
+    'scheduled': () => boolean;
+
+    /** Сигнал, эмитируемый когда срабатывает таймер (по истечении `debounce_interval`)
+     * или при немедленной эмиссии через invoke()/flush().
+     *
+     * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
+    'occurred': () => boolean;
+
+    /** Сигнал, эмитируемый при отмене запланированной эмиссии.
+     *
+     * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
+    'canceled': () => boolean;
+
 }
 
-type SignalSignatures = DelayedSignalSignatures & GObject.Object.SignalSignatures;
+//type SignalSignatures = DelayedSignalSignatures;
 
 /** Класс, реализующий паттерн "debounce" на базе сигналов GObject.
  *
@@ -83,43 +108,20 @@ type SignalSignatures = DelayedSignalSignatures & GObject.Object.SignalSignature
  * // через 300мс → 'occurred'
  * ~~~
  */
-@GDecorator.Widget({
-    GTypeName: 'DelayedSignal',
-    Signals: {
+export class DelayedSignal implements IDecommissionable {
 
-        /** Сигнал, эмитируемый при первом планировании отложенной эмиссии.
-         * При перепланировании (сброс уже активного таймера) этот сигнал НЕ эмиттируется.
-         *
-         * Т.е. он всегда перед сигналом 'occurred', если тот еще не выбрасывался,
-         * или если после последнего выброса 'occurred' прошло больше `debounce_interval`,
-         * и планируется новый выброс 'occurred'.
-         *
-         * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
-        'scheduled': {},
 
-        /** Сигнал, эмитируемый когда срабатывает таймер (по истечении `debounce_interval`)
-         * или при немедленной эмиссии через invoke()/flush().
-         *
-         * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
-        'occurred': {},
-
-        /** Сигнал, эмитируемый при отмене запланированной эмиссии.
-         *
-         * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
-        'canceled': {}
+    static {
+        // Применить сигнальный интерфейс к прототипу
+        register_signals_for_prototype(DelayedSignal);
     }
-})
-export class DelayedSignal extends GObject.Object implements IDecommissionable {
 
     // #region SignalsInterface
-    // ------------------------
-
-
-    /** @see {@link SignalSignatures} */
-    declare emit: <K extends keyof SignalSignatures>(signal: K, ...args: Parameters<SignalSignatures[K]>) => ReturnType<SignalSignatures[K]>;
-    declare connect: <K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>) => number;
-    declare connect_after: <K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>) => number;
-
+    declare emit: ISignals<DelayedSignalSignatures>['emit'];
+    declare connect: ISignals<DelayedSignalSignatures>['connect'];
+    declare disconnect: ISignals<DelayedSignalSignatures>['disconnect'];
+    declare disconnectAll: ISignals<DelayedSignalSignatures>['disconnectAll'];
+    declare signalHandlerIsConnected: ISignals<DelayedSignalSignatures>['signalHandlerIsConnected'];
     // #endregion
 
     /** Активный таймер. */
@@ -140,7 +142,6 @@ export class DelayedSignal extends GObject.Object implements IDecommissionable {
             throw new TypeError('DelayedSignal: Interval must be a positive integer');
         }
 
-        super();
         this.delay = delay;
     }
 
@@ -272,17 +273,16 @@ export class DelayedSignal extends GObject.Object implements IDecommissionable {
         }
 
         // "Ломаем" все публичные методы
-        this.emit = (throw_decommissioned as typeof this.emit);
-        this.connect = (throw_decommissioned as typeof this.connect);
-        this.connect_after = (throw_decommissioned as typeof this.connect_after);
-        this.is_pending = (throw_decommissioned as typeof this.is_pending);
-        this.pending_invoke = (throw_decommissioned as typeof this.pending_invoke);
-        this.invoke = (throw_decommissioned as typeof this.invoke);
-        this.flush = (throw_decommissioned as typeof this.flush);
-        this.cancel = (throw_decommissioned as typeof this.cancel);
+        this.emit = throw_decommissioned as never;
+        this.connect = throw_decommissioned as never;
+        this.is_pending = throw_decommissioned as never;
+        this.pending_invoke = throw_decommissioned as never;
+        this.invoke = throw_decommissioned as never;
+        this.flush = throw_decommissioned as never;
+        this.cancel = throw_decommissioned as never;
 
-        this.timer = undefined as unknown as typeof this.timer;
-        this.delay = undefined as unknown as typeof this.delay;
+        this.timer = undefined as never;
+        this.delay = undefined as never;
 
         this.decommission = DECOMMISSIONED;
     };
