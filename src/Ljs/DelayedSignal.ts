@@ -57,10 +57,7 @@ interface DelayedSignalSignatures {
      *
      * @param source - Экземпляр DelayedSignal, который эмиттировал сигнал */
     'canceled': () => boolean;
-
 }
-
-//type SignalSignatures = DelayedSignalSignatures;
 
 /** Класс, реализующий паттерн "debounce" на базе сигналов GObject.
  *
@@ -108,7 +105,7 @@ interface DelayedSignalSignatures {
  * // через 300мс → 'occurred'
  * ~~~
  */
-export class DelayedSignal implements IDecommissionable {
+export class DelayedSignal implements ISignals<DelayedSignalSignatures>, IDecommissionable {
 
 
     static {
