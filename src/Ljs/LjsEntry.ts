@@ -42,8 +42,13 @@ import {
 } from './Text.js';
 
 import {
-SignalPropagate
+    IGSignals,
+} from './IGSignals.js';
+
+import {
+    SignalPropagate,
 } from './ISignals.js';
+
 
 export type EntryConstructorProps = Omit<Gtk.Entry.ConstructorProps, 'truncate_multiline' | 'truncateMultiline'> & {
     debounce_delay: number;
@@ -127,23 +132,13 @@ type SignalSignatures = EntrySignalSignatures & Gtk.Entry.SignalSignatures;
     },
     GTypeFlags: GObject.TypeFlags.FINAL
 })
-export class LjsEntry extends Gtk.Entry implements IDecommissionable {
+export class LjsEntry extends Gtk.Entry implements IGSignals<LjsEntry, SignalSignatures>, IDecommissionable {
 
     // #region SignalsInterface
     // ------------------------
-
-    override emit<K extends keyof SignalSignatures>(signal: K, ...args: Parameters<SignalSignatures[K]>): ReturnType<SignalSignatures[K]> {
-        return super.emit(signal, ...args) as ReturnType<SignalSignatures[K]>;
-    }
-
-    override connect<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
-        return super.connect(signal, callback);
-    }
-
-    override connect_after<K extends keyof SignalSignatures>(signal: K, callback: GObject.SignalCallback<this, SignalSignatures[K]>): number {
-        return super.connect_after(signal, callback);
-    }
-
+    declare emit: IGSignals<LjsEntry, SignalSignatures>['emit'];
+    declare connect: IGSignals<LjsEntry, SignalSignatures>['connect'];
+    declare connect_after: IGSignals<LjsEntry, SignalSignatures>['connect_after'];
     // #endregion
 
     /** Минимальная задержка для debounced сигнала в миллисекундах
@@ -178,7 +173,6 @@ export class LjsEntry extends Gtk.Entry implements IDecommissionable {
         // Настройка debounced сигнала 'debounced-changed'
         this.debounced.changes = new DelayedSignal(Math.max(debounce_delay ?? 0, LjsEntry.DEFAULT_DELAY));
         this.debounced.handler_id = this.debounced.changes.connect('occurred', this.emit_debounced_changed.bind(this));
-
     }
 
     // #region Свойства truncate_multiline
